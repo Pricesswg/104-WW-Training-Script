@@ -1,6 +1,6 @@
 -- =========================================================
---  TRAINING_Intercept.lua — Scramble intercept trainer
---  v1.0 — feature-script style, native DCS scripting engine only
+--  TRAINING_Intercept.lua  (scramble intercept trainer)
+--  v1.0, feature-script style, native DCS scripting engine only
 -- ---------------------------------------------------------
 --  Arms when a BLUE player enters INTERCEPT_PLAYER_ZONE and
 --  exposes an F10 menu (only while in the zone). A scramble
@@ -95,7 +95,7 @@ local function _airWP(x, z, altM, speed)
 end
 
 -- Targets must stay passive: WEAPON HOLD, radar NEVER, NO REACTION. Apply on a
--- short delay and re-lookup by name — controller options share the post-spawn
+-- short delay and re-lookup by name, controller options share the post-spawn
 -- binding race that bites setTask.
 local function _applyPassive(name)
     timer.scheduleFunction(function()
@@ -111,7 +111,7 @@ end
 
 local function _spawnTarget()
     local limit = trigger.misc.getZone(CFG.limitZone)
-    if not limit then _out("[Intercept] Limit zone missing — cannot spawn.", 12); return end
+    if not limit then _out("[Intercept] Limit zone missing, cannot spawn.", 12); return end
 
     -- Random objective; spawn on the OPPOSITE bearing so the target transits the box.
     local objName = CFG.objectives[math.random(#CFG.objectives)]
@@ -236,7 +236,7 @@ local function _tick(_, t)
                         local gid = g and g:getID()
                         if gid then
                             STATE.armed[nm] = { groupId = gid, menuRoot = _buildMenuForGroup(gid) }
-                            trigger.action.outTextForUnit(u:getID(), "[Intercept] Scramble control available — F10 radio menu.", 10)
+                            trigger.action.outTextForUnit(u:getID(), "[Intercept] Scramble control available, F10 radio menu.", 10)
                         end
                     end
                 end
@@ -264,7 +264,7 @@ local function _tick(_, t)
                 if u and (now - info.spawnTime) > CFG.graceSec and not _inZone(u:getPoint(), lzone) then
                     g:destroy()
                     STATE.targets[name] = nil
-                    _out("[Intercept] Target left the area — despawned.", 8)
+                    _out("[Intercept] Target left the area, despawned.", 8)
                 end
             end
         end

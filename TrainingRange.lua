@@ -1,8 +1,8 @@
 -- ===========================================================================
--- TRAINING RANGE — TrainingRange.lua
+-- TRAINING RANGE  (TrainingRange.lua)
 -- ===========================================================================
 -- Author:     Alessandro Simonitto
--- Repository: https://github.com/Pricesswg/   (update with the real URL)
+-- Repository: https://github.com/Pricesswg/104-WW-Training-Script
 -- License:    MIT
 --
 -- Single-file feature script, native DCS scripting engine only (no MOOSE /
@@ -11,19 +11,20 @@
 -- INSTALLATION:
 --   1. Open the mission in the Mission Editor.
 --   2. Create the zones listed below (type: Circle) with the EXACT names.
---   3. Fill in the spawnPoint coordinates in the TR_Config block.
---   4. Add a trigger:  MISSION START -> DO SCRIPT FILE -> TrainingRange.lua
---   5. Full documentation and wiki: see the GitHub repository.
+--   3. Add a trigger:  MISSION START -> DO SCRIPT FILE -> TrainingRange.lua
+--   4. Full documentation and wiki: see the GitHub repository.
 --
 -- REQUIRED ZONES IN THE MISSION EDITOR (type: Circle):
---   TR_BOMBING      radius ~3000m    bombing range
---   TR_DOGFIGHT     radius ~15000m   dogfight arena
---   TR_SEAD_RADAR   radius ~8000m    radar SAM zone
---   TR_SEAD_IR      radius ~5000m    IR / AAA zone
+--   TR_BOMBING        radius ~3000m    bombing range
+--   TR_DOGFIGHT       radius ~15000m   dogfight arena
+--   TR_SEAD_RADAR     radius ~8000m    radar SAM zone (SAM spawns at a random point inside)
+--   TR_SEAD_IR        radius ~5000m    IR / AAA zone (threat spawns at a random point inside)
+--   TR_CARRIER        radius ~2000m    carrier strike group spawns at the zone centre
+--   TR_REFUEL_BASKET  radius ~10000m   basket tanker orbit anchor (random point inside)
+--   TR_REFUEL_BOOM    radius ~10000m   boom tanker orbit anchor (random point inside)
 --
--- COORDINATES: to read x/z in DCS, place the cursor on the desired point on
--- the ME map and read the values from the Coordinate tab. Carrier and tankers
--- do NOT use ME zones; their absolute x/z go in TR_Config.
+-- Every spawn location is an ME zone now, so there are no x/z coordinates to
+-- enter by hand. Place the zones where you want the activity to happen.
 --
 -- EDITABLE PARAMETERS:
 -- Everything you are meant to tune lives in the TR_Config block below.
@@ -55,51 +56,57 @@ TR_Config = {
     -- SEAD RANGE
     -- -----------------------------------------------------------------------
     sead = {
-        radarZone    = "TR_SEAD_RADAR",     -- ME zone name, radar SAM
-        irZone       = "TR_SEAD_IR",        -- ME zone name, IR/AAA
-        pollInterval = 2,                   -- seconds between player-immortality checks
-        radarSpawnPoint = { x = 0, z = 0 }, -- FILL IN: radar SAM spawn centre
-        irSpawnPoint    = { x = 0, z = 0 }, -- FILL IN: IR/AAA spawn centre
+        radarZone    = "TR_SEAD_RADAR", -- ME zone, radar SAM (spawns at a random point inside)
+        irZone       = "TR_SEAD_IR",    -- ME zone, IR/AAA (spawns at a random point inside)
+        pollInterval = 2,               -- seconds between player-immortality checks
     },
     -- -----------------------------------------------------------------------
     -- CARRIER OPS
     -- -----------------------------------------------------------------------
     carrier = {
-        unitName             = "TR_CARRIER",      -- carrier unit AND group name
-        type                 = "Stennis",         -- carrier type (added: spec omitted it).
-                                                  -- "Stennis" needs no DLC. Swap for
-                                                  -- "CVN_73"/"CVN_71" if you own Supercarrier.
-        spawnPoint           = { x = 0, z = 0 },  -- FILL IN: carrier spawn coordinates
-        speed                = 15,                -- carrier speed in knots
-        recoveryTankerAlt    = 1500,              -- S-3B altitude in metres
-        recoveryTankerSpeed  = 280,               -- S-3B speed in km/h
+        zone                 = "TR_CARRIER", -- ME zone, the strike group spawns at its centre
+        groupName            = "TR_CSG",     -- ship group name (carrier + escorts)
+        unitName             = "TR_CARRIER", -- carrier ship unit name (recovery reference)
+        type                 = "Stennis",    -- carrier type. "Stennis" needs no DLC; swap for
+                                             -- "CVN_73"/"CVN_71" if you own Supercarrier.
+        speed                = 15,           -- carrier speed in knots
+        -- Escort screen, spawned in formation with the carrier and held as the
+        -- group steams (they turn with it into the wind). fwd/stbd are metres in
+        -- the carrier frame (fwd along the heading, stbd to the right). Edit the
+        -- positions to taste, swap the types if a name differs in your DCS build.
+        escorts = {
+            { type = "TICONDEROG",            fwd =  9260, stbd =     0 }, -- AAW cruiser, leading
+            { type = "USS_Arleigh_Burke_IIa", fwd =  5500, stbd = -5500 }, -- DDG, port bow
+            { type = "USS_Arleigh_Burke_IIa", fwd =  5500, stbd =  5500 }, -- DDG, starboard bow
+            { type = "PERRY",                 fwd = -3700, stbd =   900 }, -- frigate, plane guard astern
+        },
+        recoveryTankerAlt    = 1500,         -- S-3B altitude in metres
+        recoveryTankerSpeed  = 280,          -- S-3B speed in km/h
         recoveryTankerOffset = { x = 20000, z = 0 }, -- S-3B offset from the carrier (x/z metres)
-        recoveryTankerFreq   = 253.0,             -- added: S-3B radio freq (MHz, AM) for the message
-        recoveryTankerTacan  = { channel = 53, mode = "Y", callsign = "RCV" }, -- added: S-3B TACAN
+        recoveryTankerFreq   = 253.0,        -- S-3B radio freq (MHz, AM) for the message
+        recoveryTankerTacan  = { channel = 53, mode = "Y", callsign = "RCV" }, -- S-3B TACAN
     },
     -- -----------------------------------------------------------------------
     -- REFUELING SERVICE
     -- -----------------------------------------------------------------------
     refueling = {
         basket = {
-            type       = "KC135MPRS",          -- probe-and-drogue tanker (exact DCS type)
-            alt        = 6000,                 -- altitude in metres
-            speed      = 480,                  -- speed in km/h
-            heading    = 090,                  -- track heading in degrees
-            spawnPoint = { x = 0, z = 0 },     -- FILL IN
-            tacan      = { channel = 51, mode = "Y", callsign = "TKR" },
-            freq       = 251.0,                -- AM frequency in MHz
+            type    = "KC135MPRS",        -- probe-and-drogue tanker (exact DCS type)
+            zone    = "TR_REFUEL_BASKET", -- ME zone, orbit anchored at a random point inside
+            alt     = 6000,               -- altitude in metres
+            speed   = 480,                -- speed in km/h
+            heading = 090,                -- track heading in degrees
+            tacan   = { channel = 51, mode = "Y", callsign = "TKR" },
+            freq    = 251.0,              -- AM frequency in MHz
         },
         boom = {
-            type       = "KC-135",             -- boom tanker. NOTE: exact DCS type is
-                                               -- "KC-135" (hyphen). The spec's "KC_135"
-                                               -- would not spawn.
-            alt        = 7000,
-            speed      = 500,
-            heading    = 090,
-            spawnPoint = { x = 0, z = 0 },     -- FILL IN
-            tacan      = { channel = 52, mode = "Y", callsign = "TKB" },
-            freq       = 252.0,
+            type    = "KC-135",           -- boom tanker (exact DCS type, keep the hyphen)
+            zone    = "TR_REFUEL_BOOM",   -- ME zone, orbit anchored at a random point inside
+            alt     = 7000,
+            speed   = 500,
+            heading = 090,
+            tacan   = { channel = 52, mode = "Y", callsign = "TKB" },
+            freq    = 252.0,
         },
     },
     -- -----------------------------------------------------------------------
@@ -109,24 +116,13 @@ TR_Config = {
 }
 
 -- ===========================================================================
--- COORDINATES TO FILL IN  (placeholders left as { x = 0, z = 0 } on purpose)
--- ---------------------------------------------------------------------------
--- The following points are NOT derived from ME zones and must be entered by
--- hand. Until you set them the affected feature spawns at the map origin and
--- prints a warning.
---
---   TR_Config.sead.radarSpawnPoint     -- centre of the radar SAM site
---   TR_Config.sead.irSpawnPoint        -- centre of the IR/AAA site
---   TR_Config.carrier.spawnPoint       -- carrier start position
---   TR_Config.refueling.basket.spawnPoint
---   TR_Config.refueling.boom.spawnPoint
---
--- How to read x/z in the ME: hover the point, read the Coordinate tab. In DCS
--- runtime coordinates x is one horizontal axis and z the other (y is altitude).
+-- All spawn locations are ME zones (see the header list). Nothing to fill in by
+-- hand. If a zone is missing, the affected menu action prints a "zone not found"
+-- message instead of spawning.
 -- ===========================================================================
 
 -- ===========================================================================
--- FINE PARAMETRI EDITABILI — do not edit below this line unless you know the code
+-- FINE PARAMETRI EDITABILI: do not edit below this line unless you know the code
 -- ===========================================================================
 
 -- ===========================================================================
@@ -252,12 +248,6 @@ local function _randomLandPointInZone(zone, margin, tries)
         if _surfaceOk(p.x, p.z) then return p end
     end
     return _randomPointInZone(zone, margin) -- give up on land, return anything in zone
-end
-
-local function _warnIfUnset(pt, label)
-    if pt and pt.x == 0 and pt.z == 0 then
-        _out("[Training Range] WARNING: " .. label .. " is still {x=0,z=0} (FILL IN). Spawning at map origin.", 15)
-    end
 end
 
 local function _destroyGroupByName(name)
@@ -536,7 +526,7 @@ local function _bombingReset()
 end
 
 -- ===========================================================================
--- MODULE: DOGFIGHT ZONE  (automatic, no menu — players just fly in)
+-- MODULE: DOGFIGHT ZONE  (automatic, no menu, players just fly in)
 -- ===========================================================================
 local function _dogfightTick()
     local zone = _getZone(TR_Config.dogfight.zone); if not zone then return end
@@ -596,7 +586,7 @@ local function _seadTick()
             if inside and not TR_SEAD.players[name] then
                 _setImmortal(u, true)
                 TR_SEAD.players[name] = true
-                _msgToUnit(u, "[SEAD] Immortal ON. Hunt the active emitters — you cannot be killed inside the range.", 15)
+                _msgToUnit(u, "[SEAD] Immortal ON. Hunt the active emitters, you cannot be killed inside the range.", 15)
             elseif (not inside) and TR_SEAD.players[name] then
                 _setImmortal(u, false)
                 TR_SEAD.players[name] = nil
@@ -611,9 +601,10 @@ end
 
 local function _seadSpawnRadar(key)
     local preset = SEAD_RADAR_PRESETS[key]; if not preset then return end
-    _warnIfUnset(TR_Config.sead.radarSpawnPoint, "SEAD radar spawn point")
+    local zone = _getZone(TR_Config.sead.radarZone); if not zone then return end
     if TR_SEAD.radarActive then _destroyGroupByName(TR_SEAD.radarActive) end -- one radar preset at a time
-    _spawnGround(preset.group, preset.units, TR_Config.sead.radarSpawnPoint, ENEMY_COUNTRY)
+    local center = _randomLandPointInZone(zone, 500) -- keep the cluster off the edge
+    _spawnGround(preset.group, preset.units, center, ENEMY_COUNTRY)
     _setGroundCombatReady(preset.group)
     TR_SEAD.radarActive = preset.group
     _out("[SEAD] Radar SAM active: " .. key .. " (" .. preset.group .. ").", 10)
@@ -621,9 +612,10 @@ end
 
 local function _seadSpawnIR(key)
     local preset = SEAD_IR_PRESETS[key]; if not preset then return end
-    _warnIfUnset(TR_Config.sead.irSpawnPoint, "SEAD IR/AAA spawn point")
+    local zone = _getZone(TR_Config.sead.irZone); if not zone then return end
     if TR_SEAD.irActive then _destroyGroupByName(TR_SEAD.irActive) end -- one IR preset at a time
-    _spawnGround(preset.group, preset.units, TR_Config.sead.irSpawnPoint, ENEMY_COUNTRY)
+    local center = _randomLandPointInZone(zone, 500)
+    _spawnGround(preset.group, preset.units, center, ENEMY_COUNTRY)
     _setGroundCombatReady(preset.group)
     TR_SEAD.irActive = preset.group
     _out("[SEAD] IR/AAA active: " .. key .. " (" .. preset.group .. ").", 10)
@@ -679,30 +671,45 @@ local function _carrierSpawn()
     if TR_Carrier.spawned and Unit.getByName(TR_Config.carrier.unitName) then
         _out("[Carrier] Already on station."); return
     end
-    local sp = TR_Config.carrier.spawnPoint
-    _warnIfUnset(sp, "carrier spawn point")
+    local zone = _getZone(TR_Config.carrier.zone); if not zone then return end
+    local cx, cz = zone.point.x, zone.point.z
     local speedMS = TR_Config.carrier.speed * KT_TO_MS
-    local rad = math.rad(270) -- initial heading 270
-    local far = { x = sp.x + math.sin(rad) * 40000, z = sp.z + math.cos(rad) * 40000 }
+    local h = math.rad(270)                       -- initial heading 270
+    local fwdx, fwdz = math.sin(h), math.cos(h)   -- carrier-frame forward (along heading)
+    local stbx, stbz = math.cos(h), -math.sin(h)  -- carrier-frame starboard (to the right)
+
+    -- Unit 1 is the carrier (the recovery reference). The escorts follow in the
+    -- screen defined in TR_Config; one group keeps the formation as it steams.
+    local units = { [1] = {
+        ["type"] = TR_Config.carrier.type, ["name"] = TR_Config.carrier.unitName,
+        ["x"] = cx, ["y"] = cz, ["heading"] = h, ["skill"] = "High",
+    } }
+    for i, e in ipairs(TR_Config.carrier.escorts or {}) do
+        local ox = e.fwd * fwdx + e.stbd * stbx
+        local oz = e.fwd * fwdz + e.stbd * stbz
+        units[#units + 1] = {
+            ["type"] = e.type, ["name"] = TR_Config.carrier.groupName .. "_ESC" .. i,
+            ["x"] = cx + ox, ["y"] = cz + oz, ["heading"] = h, ["skill"] = "High",
+        }
+    end
+
+    local far = { x = cx + fwdx * 40000, z = cz + fwdz * 40000 }
     local function _shipWP(x, z)
         return { ["x"] = x, ["y"] = z, ["type"] = "Turning Point", ["action"] = "Turning Point",
                  ["speed"] = speedMS, ["ETA"] = 0, ["ETA_locked"] = false,
                  ["task"] = { id = "ComboTask", params = { tasks = {} } } }
     end
     local groupData = {
-        ["name"]  = TR_Config.carrier.unitName,
+        ["name"]  = TR_Config.carrier.groupName,
         ["task"]  = "Nothing",
-        ["units"] = { [1] = {
-            ["type"] = TR_Config.carrier.type, ["name"] = TR_Config.carrier.unitName,
-            ["x"] = sp.x, ["y"] = sp.z, ["heading"] = rad, ["skill"] = "High",
-        } },
-        ["route"] = { ["points"] = { [1] = _shipWP(sp.x, sp.z), [2] = _shipWP(far.x, far.z) } },
+        ["units"] = units,
+        ["route"] = { ["points"] = { [1] = _shipWP(cx, cz), [2] = _shipWP(far.x, far.z) } },
     }
     local grp
     pcall(function() grp = coalition.addGroup(FRIENDLY_COUNTRY, Group.Category.SHIP, groupData) end)
     TR_Carrier.spawned = (grp ~= nil)
-    _out("[Carrier] On station, steaming 270 at " .. TR_Config.carrier.speed .. " kt. Unit: " ..
-         TR_Config.carrier.unitName .. ".", 12)
+    _out(string.format("[Carrier] Strike group on station, steaming 270 at %d kt (carrier plus %d escorts).",
+         TR_Config.carrier.speed, #units - 1), 12)
 end
 
 local function _carrierRecovery()
@@ -730,7 +737,7 @@ local function _carrierDeckStatus()
     if not u then _out("[Carrier] Carrier not on station."); return end
     local course, kt = _carrierWind(u:getPoint())
     local case = (kt > 10) and "CASE I" or "CASE III"
-    _out(string.format("[Carrier] Deck status — recovery course %03d, wind %d kt from %03d. Suggested: %s.",
+    _out(string.format("[Carrier] Deck status, recovery course %03d, wind %d kt from %03d. Suggested: %s.",
          _round(course) % 360, _round(kt), _round(course) % 360, case), 15)
 end
 
@@ -739,7 +746,11 @@ local function _carrierTanker()
         _out("[Carrier] Recovery tanker already airborne."); return
     end
     local u = Unit.getByName(TR_Config.carrier.unitName)
-    local base = u and u:getPoint() or { x = TR_Config.carrier.spawnPoint.x, z = TR_Config.carrier.spawnPoint.z }
+    local base = u and u:getPoint()
+    if not base then
+        local z = trigger.misc.getZone(TR_Config.carrier.zone)
+        base = z and { x = z.point.x, z = z.point.z } or { x = 0, z = 0 }
+    end
     local off = TR_Config.carrier.recoveryTankerOffset
     local grp = _spawnTanker({
         name = "TR_S3_TANKER", type = "S-3B Tanker",
@@ -764,7 +775,7 @@ local function _carrierRemoveTanker()
 end
 
 local function _carrierReset()
-    _destroyGroupByName(TR_Config.carrier.unitName)
+    _destroyGroupByName(TR_Config.carrier.groupName)
     _destroyGroupByName(TR_Carrier.recoveryTanker)
     TR_Carrier.spawned = false
     TR_Carrier.recoveryTanker = nil
@@ -782,12 +793,13 @@ local function _refuelSpawn(which)
     if TR_Refueling[which] and Group.getByName(TR_Refueling[which]) then
         _out("[Refueling] " .. label .. " tanker already in service."); return
     end
-    _warnIfUnset(c.spawnPoint, "refueling " .. which .. " spawn point")
+    local zone = _getZone(c.zone); if not zone then return end
+    local anchor = _randomPointInZone(zone, 1000) -- orbit anchor inside the zone
     local name = _refuelNames[which]
     local grp = _spawnTanker({
         name = name, type = c.type,
         alt = c.alt, speedMS = c.speed * KMH_TO_MS, headingDeg = c.heading,
-        center = { x = c.spawnPoint.x, z = c.spawnPoint.z },
+        center = anchor,
         freq = c.freq, tacan = c.tacan,
     })
     TR_Refueling[which] = grp and name or nil

@@ -1,6 +1,6 @@
 -- =========================================================
---  TRAINING_GCA.lua — Ground Controlled Approach (text talkdown)
---  v1.0 — feature-script style, native DCS scripting engine only
+--  TRAINING_GCA.lua  (Ground Controlled Approach, text talkdown)
+--  v1.0, feature-script style, native DCS scripting engine only
 -- ---------------------------------------------------------
 --  Activates when a BLUE player enters GCA_ACTIVE_ZONE and then,
 --  once per second, talks the pilot down to a runway defined in
