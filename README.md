@@ -1,7 +1,7 @@
 # 104 WW Training Script
 
 Standalone training scripts for DCS World, built on the native scripting engine
-only (no MOOSE / MIST / CTLD). Three **independent** feature scripts — load any
+only (no MOOSE / MIST / CTLD). Three **independent** feature scripts, load any
 or all of them, in any order.
 
 | Script | What it does |
