@@ -262,9 +262,10 @@ local function _tick(_, t)
                 local us = g:getUnits()
                 local u  = us and us[1]
                 if u and (now - info.spawnTime) > CFG.graceSec and not _inZone(u:getPoint(), lzone) then
+                    local utype = (u.getTypeName and u:getTypeName()) or "target"
                     g:destroy()
                     STATE.targets[name] = nil
-                    _out("[Intercept] Target left the area, despawned.", 8)
+                    _out("[Intercept] " .. utype .. " reached the boundary and escaped. Intercept failed.", 12)
                 end
             end
         end
@@ -287,7 +288,7 @@ function _handler:onEvent(event)
         if not gname or not STATE.targets[gname] then return end
         STATE.targets[gname] = nil
         local utype = (u.getTypeName and u:getTypeName()) or "target"
-        _out("[Intercept] Splash! " .. utype .. " down.", 10)
+        _out("[Intercept] Splash! " .. utype .. " down. Intercept successful.", 12)
     end)
     if not ok and env and env.info then env.info("[Intercept] onEvent error: " .. tostring(err)) end
 end
