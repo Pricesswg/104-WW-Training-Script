@@ -3,14 +3,17 @@
 --  v1.0, feature-script style, native DCS scripting engine only
 -- ---------------------------------------------------------
 --  Activates when a BLUE player enters GCA_ACTIVE_ZONE and then,
---  once per second, talks the pilot down to a runway defined in
---  CFG (heading + threshold point + glideslope angle). Azimuth and
---  glideslope deviations are both reported as angles. Deactivates
---  on landing (S_EVENT_LAND) or on leaving the zone. Independent
---  state per player, so several approaches can run at once.
+--  once per second, talks the pilot down. With CFG.auto (default) it
+--  finds the airbase under the zone, reads its runways and picks the
+--  active (into-wind) one, deriving heading and threshold on its own;
+--  set CFG.auto = false to use the manual runway in CFG instead. The
+--  glideslope is CFG.glideslope_angle (3.0 by default). Azimuth and
+--  glideslope deviations are both reported as angles. Deactivates on
+--  landing (S_EVENT_LAND) or on leaving the zone. Independent state
+--  per player, so several approaches can run at once.
 --
 --  REQUIRED ME ZONE (type: Circle):
---    GCA_ACTIVE_ZONE   coverage area where the talkdown runs
+--    GCA_ACTIVE_ZONE   coverage area, placed over the airfield
 --
 --  The continuous talkdown calls use real GCA phraseology (callsign
 --  first, no bracket); only system/status lines carry the [GCA] tag.
@@ -34,8 +37,9 @@ end
 local CFG = {
     debug            = false,
     zone             = "GCA_ACTIVE_ZONE",
-    runway_heading   = 250,             -- degrees true (FILL IN for your runway)
-    threshold_point  = { x = 0, z = 0 }, -- world x/z of the landing threshold (FILL IN)
+    auto             = true,            -- auto-detect the runway from the airbase under the zone
+    runway_heading   = 250,             -- manual fallback heading (used if auto is off or fails)
+    threshold_point  = { x = 0, z = 0 }, -- manual fallback threshold (world x/z)
     glideslope_angle = 3.0,             -- degrees
     gear_check_nm    = 3.0,             -- range (nm) at which "check gear" is appended once
     minRange_m       = 185,             -- ~0.1 nm: stop talking inside this (essentially landing)
@@ -46,7 +50,7 @@ local CFG = {
 }
 
 -- ============== State (file-local) ==============
-local STATE = { players = {} } -- [unitName] = { gearCalled = bool }
+local STATE = { players = {} } -- [unitName] = { gearCalled, heading, threshold = {x,z} }
 
 -- ============== Helpers ==============
 local NM_M = 1852
@@ -64,18 +68,71 @@ local function _callsign(u)
     return (cs ~= nil and cs ~= "") and cs or "Approach"
 end
 
--- Resolve the geometry of the aircraft relative to the configured runway.
+-- Auto-detect the runway: find the airbase nearest the zone centre, read its
+-- runways, and pick the landing direction most into the wind (the active end),
+-- longest as a tiebreaker. Returns headingDeg, threshold{x,z}, or nil to fall
+-- back to the manual CFG values.
+-- NOTE: Airbase:getRunways() "course" is treated as a standard DCS heading
+-- (direction vector = cos/sin in x/z). If an in-game test shows the runway
+-- mirrored, negate `c` below; the rest of the geometry is convention-correct.
+local function _resolveRunwayForZone(zone)
+    if not (world and world.getAirbases) then return nil end
+    local best, bestD
+    local okScan = pcall(function()
+        for _, ab in pairs(world.getAirbases() or {}) do
+            local p = ab:getPoint()
+            if p then
+                local d = (p.x - zone.point.x) ^ 2 + (p.z - zone.point.z) ^ 2
+                if not bestD or d < bestD then bestD, best = d, ab end
+            end
+        end
+    end)
+    if not okScan or not best then return nil end
+
+    local rwys
+    if not pcall(function() rwys = best:getRunways() end) or not rwys or #rwys == 0 then return nil end
+
+    local ap = best:getPoint()
+    local w = { x = 0, z = 0 } -- if wind is unavailable we just pick by length
+    pcall(function()
+        local ww = atmosphere.getWind({ x = ap.x, y = (ap.y or 0) + 10, z = ap.z })
+        if ww then w = ww end
+    end)
+
+    local bestHdg, bestThr, bestScore
+    for _, r in ipairs(rwys) do
+        local c   = r.course or 0
+        local len = r.length or 2000
+        local cen = r.position or ap
+        for _, add in ipairs({ 0, math.pi }) do  -- the two landing ends of the runway
+            local h = c + add
+            local dx, dz = math.cos(h), math.sin(h)  -- landing direction, DCS standard
+            local headwind = -(w.x * dx + w.z * dz)  -- + = headwind
+            local score = headwind + len * 1e-6      -- ties broken by runway length
+            if not bestScore or score > bestScore then
+                bestScore = score
+                bestHdg   = math.deg(h) % 360
+                bestThr   = { x = cen.x - dx * (len / 2), z = cen.z - dz * (len / 2) }
+            end
+        end
+    end
+    return bestHdg, bestThr
+end
+
+-- Resolve the geometry of the aircraft relative to the player's runway.
 -- Returns: dme_m (straight-line range to threshold), azDeg (+ = right of
 -- centerline), gsDeg (+ = above glidepath), toThr (along-track distance to
 -- threshold; > 0 means on the approach side).
-local function _approach(u)
+local function _approach(u, st)
     local p  = u:getPoint()
-    local tx, tz = CFG.threshold_point.x, CFG.threshold_point.z
+    local tx, tz = st.threshold.x, st.threshold.z
     local relx, relz = p.x - tx, p.z - tz
 
-    local h = math.rad(CFG.runway_heading)
-    local fx, fz = math.sin(h), math.cos(h)       -- forward (landing) direction
-    local rx, rz = fz, -fx                         -- right-hand perpendicular
+    -- DCS world: +x = North, +z = East. A heading H points (cos H, sin H), so its
+    -- right side is (-sin H, cos H). MIST/MOOSE use heading = atan2(z, x).
+    local h = math.rad(st.heading)
+    local fx, fz = math.cos(h), math.sin(h)        -- forward (landing) direction
+    local rx, rz = -math.sin(h), math.cos(h)       -- right of the landing direction
 
     local along = relx * fx + relz * fz            -- + = beyond the threshold
     local cross = relx * rx + relz * rz            -- + = right of centerline
@@ -111,7 +168,7 @@ end
 
 -- ============== Per-second talkdown ==============
 local function _talkdown(u, st)
-    local dme_m, azDeg, gsDeg, toThr = _approach(u)
+    local dme_m, azDeg, gsDeg, toThr = _approach(u, st)
     if toThr <= 0 or dme_m < CFG.minRange_m then return end -- over/past the threshold
 
     local dist = dme_m / NM_M
@@ -137,10 +194,13 @@ local function _tick(_, t)
                 if _inZone(u:getPoint(), zone) then
                     seen[nm] = true
                     if not STATE.players[nm] then
-                        STATE.players[nm] = { gearCalled = false }
+                        local hdg, thr
+                        if CFG.auto then hdg, thr = _resolveRunwayForZone(zone) end
+                        if not hdg then hdg, thr = CFG.runway_heading, CFG.threshold_point end
+                        STATE.players[nm] = { gearCalled = false, heading = hdg, threshold = thr }
                         trigger.action.outTextForUnit(u:getID(),
                             string.format("[GCA] %s, radar contact, fly heading %03d, call the ball.",
-                                _callsign(u), math.floor(CFG.runway_heading)), 12)
+                                _callsign(u), math.floor(hdg)), 12)
                     end
                     _talkdown(u, STATE.players[nm])
                 end
@@ -187,8 +247,8 @@ if not GCA_Initialized then
         _out("[GCA] MISSING ZONE: " .. CFG.zone .. ". Create it in the Mission Editor. Script aborted.", 30)
         return
     end
-    if CFG.threshold_point.x == 0 and CFG.threshold_point.z == 0 then
-        _out("[GCA] WARNING: threshold_point is still {x=0,z=0} (FILL IN the runway threshold).", 20)
+    if (not CFG.auto) and CFG.threshold_point.x == 0 and CFG.threshold_point.z == 0 then
+        _out("[GCA] WARNING: auto is off and threshold_point is {x=0,z=0} (FILL IN the runway threshold).", 20)
     end
 
     world.addEventHandler(_handler)
@@ -198,5 +258,6 @@ if not GCA_Initialized then
         if not ok and env and env.info then env.info("[GCA] tick error: " .. tostring(e)) end
         return time + period
     end, nil, timer.getTime() + period)
-    _out("[GCA] Ground Controlled Approach loaded for runway heading " .. math.floor(CFG.runway_heading) .. ".", 12)
+    _out("[GCA] Ground Controlled Approach loaded (" ..
+         (CFG.auto and "auto runway detection" or ("manual runway " .. math.floor(CFG.runway_heading))) .. ").", 12)
 end

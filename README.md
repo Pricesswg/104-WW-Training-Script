@@ -72,15 +72,13 @@ Zone (type: Circle):
 
 | Zone name | Purpose |
 |---|---|
-| `GCA_ACTIVE_ZONE` | Coverage area, the talkdown runs while a player is inside |
+| `GCA_ACTIVE_ZONE` | Coverage area, placed over the airfield. The talkdown runs while a player is inside |
 
-Runway is defined in `CFG` (not a zone):
-
-| Field | Purpose | Default |
-|---|---|---|
-| `runway_heading` | Landing runway heading, degrees true | `250`, set for your runway |
-| `threshold_point` | World x/z of the landing threshold | `{x=0, z=0}`, fill this in |
-| `glideslope_angle` | Target glideslope, degrees | `3.0` |
+By default (`CFG.auto = true`) the script finds the airfield under the zone, reads its runways and
+picks the active one (most into the wind, longest as a tiebreaker), deriving the heading and threshold
+automatically when you start the approach. To set the runway by hand instead, use `CFG.auto = false`
+and fill in `runway_heading` and `threshold_point`. `glideslope_angle` (default `3.0`) is used in both
+modes.
 
 ---
 

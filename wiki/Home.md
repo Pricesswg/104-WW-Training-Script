@@ -92,27 +92,26 @@ live in the script's `CFG` if you want to tweak them.
 
 ## TRAINING_GCA.lua
 
-Create one zone (Circle):
+Create one zone (Circle), placed over the airfield you want to recover to:
 
 | Zone name | What it's tied to |
 |---|---|
-| `GCA_ACTIVE_ZONE` | Coverage area. The talkdown runs while you're inside this zone, so make it cover the approach corridor to your runway. |
+| `GCA_ACTIVE_ZONE` | Coverage area. The talkdown runs while you're inside this zone. Put it over the airfield and its approach corridor. |
 
-The runway itself is defined in `CFG`, not by a zone:
+By default (`CFG.auto = true`) that's all you do. When you enter the zone the script finds the airfield
+under it, reads its runways and picks the active one (the runway most into the current wind, longest as
+a tiebreaker), then works out the heading and threshold on its own. The runway is chosen at the moment
+you start the approach, so it follows the wind.
+
+If you'd rather set the runway by hand, put `CFG.auto = false` and fill in:
 
 | Field | What it is | Default |
 |---|---|---|
-| `runway_heading` | The landing heading of the runway, degrees true | `250`, set it to your runway |
-| `threshold_point` | World x/z of the landing threshold, where you aim to touch down | `{ x = 0, z = 0 }`, **fill this in** |
-| `glideslope_angle` | The glideslope it talks you onto, degrees | `3.0` |
+| `runway_heading` | Landing heading of the runway, degrees true | `250` |
+| `threshold_point` | World x/z of the landing threshold | `{ x = 0, z = 0 }` |
+| `glideslope_angle` | The glideslope it talks you onto, degrees | `3.0` (used in both modes) |
 
-To get the threshold x/z, place the spot on the map in the Mission Editor and read its coordinates
-from the coordinate readout, then enter them as `{ x = <x>, z = <z> }`. In DCS, x and z are the two
-horizontal axes, altitude is separate and the script handles it. If you leave it at `{ x = 0, z = 0 }`
-the script still loads but warns you on screen.
-
-The zone is just the on/off switch, the talkdown geometry comes from the runway values above. You'll
-hear calls like *"Eagle1, slightly left, 5.0 miles, well above glidepath"* once a second, and it
+You'll hear calls like *"Eagle1, slightly left, 5.0 miles, well above glidepath"* once a second, and it
 stops when you land or leave the zone.
 
 ---
