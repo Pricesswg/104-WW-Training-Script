@@ -44,24 +44,29 @@ Every spawn point is a zone. Create these (all Circle):
 
 | Zone name | Suggested radius | What it's tied to |
 |---|---|---|
-| `TR_BOMBING` | ~3000 m | Bombing range. Static targets and the convoy spawn at random points inside this zone, and smoke marks each target. Pick flat ground away from bases. |
+| `TR_BOMBING` | ~3000 m | Unarmoured targets (Ural trucks) and the convoy spawn at random points inside this zone, and smoke marks each one. Pick flat ground away from bases. |
+| `TR_ARMOR_LIGHT` | ~3000 m | Light armour (BTR-80) spawns at random points inside this zone. |
+| `TR_ARMOR_HEAVY` | ~3000 m | Heavy armour (T-90) spawns at random points inside this zone. |
 | `TR_DOGFIGHT` | ~15000 m | Dogfight arena. BLUE players inside, above the minimum AGL, become immortal and score hits on each other. Keep it clear of AI routes. |
 | `TR_SEAD_RADAR` | ~8000 m | Radar SAM area. Players inside are immortal, and the radar SAM you pick from the menu spawns at a random point inside this zone. |
 | `TR_SEAD_IR` | ~5000 m | IR / AAA area. Same idea, the IR/AAA preset spawns at a random point inside. Keep it next to `TR_SEAD_RADAR` but not overlapping. |
-| `TR_CARRIER` | ~2000 m | Carrier strike group. The carrier plus its escort screen spawns at the centre of this zone, then steams on heading 270. Put it on open water with sea room ahead. |
-| `TR_REFUEL_BASKET` | ~10000 m | Basket (probe-and-drogue) tanker. Its orbit is anchored at a random point inside this zone. |
-| `TR_REFUEL_BOOM` | ~10000 m | Boom tanker. Same, anchored at a random point inside this zone. |
+| `TR_CARRIER` | ~2000 m | Carrier strike group. The carrier plus its escort screen spawns at the centre at mission start and steams on heading 270. Put it on open water with sea room ahead. |
+| `TR_REFUEL_BASKET` | ~10000 m | Basket (probe-and-drogue) tanker. Its racetrack is laid out inside this zone. May be a Circle or a Quad. |
+| `TR_REFUEL_BOOM` | ~10000 m | Boom tanker. Same, racetrack fitted inside the zone. Circle or Quad. |
 
 A few notes:
 
-* The **carrier** spawns as a full group: the carrier as the lead, plus escorts (a cruiser, two
-  destroyers and a plane-guard frigate) in formation. They steam and turn together, so the screen
-  stays a useful visual reference when you fly the pattern. You can change the escort types and
-  their formation in `TR_Config.carrier.escorts`.
-* The **carrier and the tankers** don't need any coordinates. They live entirely on their zones plus
-  the speed, altitude and TACAN values in `TR_Config`.
-* The recovery S-3B tanker still flies relative to the carrier (offset in `TR_Config`), so it follows
-  the boat wherever you place the zone.
+* The **carrier** is on station from mission start, no need to spawn it. It comes up as a full group:
+  the carrier as the lead, plus escorts (a cruiser, two destroyers and a plane-guard frigate) in
+  formation, steaming and turning together so the screen stays a useful reference when you fly the
+  pattern. From the **Carrier Ops** menu you set the group speed and its ROE (Engage, or Defend only
+  so it does not open fire on ground units it sails past). Escort types and formation live in
+  `TR_Config.carrier.escorts`.
+* The **tankers** lay their racetrack inside the assigned zone, so they stay in their area. You can
+  change each tanker's speed (Mach 0.3 to 0.6) from the **Refueling** menu to match what you fly.
+* The bombing targets (Ural, BTR-80, T-90) and the convoy are all weapon-hold, so they never shoot back.
+* The recovery S-3B tanker flies relative to the carrier (offset in `TR_Config`), so it follows the
+  boat wherever you place the zone.
 
 ---
 

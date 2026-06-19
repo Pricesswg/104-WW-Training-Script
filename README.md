@@ -31,19 +31,25 @@ shows a visible message if any are missing.
 
 Zones (type: Circle, radius is a suggestion):
 
+Zones are Circle, except the two tanker zones which may also be Quad.
+
 | Zone name | Module | Suggested radius |
 |---|---|---|
-| `TR_BOMBING` | Bombing range (targets spawn inside) | ~3000 m |
+| `TR_BOMBING` | Unarmoured targets (Ural) spawn inside | ~3000 m |
+| `TR_ARMOR_LIGHT` | Light armour (BTR-80) spawns inside | ~3000 m |
+| `TR_ARMOR_HEAVY` | Heavy armour (T-90) spawns inside | ~3000 m |
 | `TR_DOGFIGHT` | Dogfight arena | ~15000 m |
 | `TR_SEAD_RADAR` | Radar SAM (spawns at a random point inside) | ~8000 m |
 | `TR_SEAD_IR` | IR / AAA (spawns at a random point inside) | ~5000 m |
-| `TR_CARRIER` | Carrier strike group spawns at the centre | ~2000 m |
-| `TR_REFUEL_BASKET` | Basket tanker orbit anchor (random inside) | ~10000 m |
-| `TR_REFUEL_BOOM` | Boom tanker orbit anchor (random inside) | ~10000 m |
+| `TR_CARRIER` | Carrier strike group spawns here at mission start | ~2000 m |
+| `TR_REFUEL_BASKET` | Basket tanker racetrack (fits inside, circle or quad) | ~10000 m |
+| `TR_REFUEL_BOOM` | Boom tanker racetrack (fits inside, circle or quad) | ~10000 m |
 
-The carrier spawns as a full group (carrier plus a cruiser, two destroyers and a plane-guard
-frigate) in formation, steaming together as a reference for recovery. Edit the escort types and
-positions in `TR_Config.carrier.escorts`. No coordinates to fill in for any of these.
+The carrier is on station from mission start as a full group (carrier plus a cruiser, two destroyers
+and a plane-guard frigate) in formation. From the Carrier Ops menu you set the group speed and its
+ROE (Engage, or Defend only so it does not fire on ground units it passes). Tanker speed is selectable
+(Mach 0.3 to 0.6) from the Refueling menu. Bombing targets are weapon-hold. Escorts are configurable
+in `TR_Config.carrier.escorts`. No coordinates to fill in for any of these.
 
 ### TRAINING_Intercept.lua
 

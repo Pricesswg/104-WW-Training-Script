@@ -14,17 +14,19 @@
 --   3. Add a trigger:  MISSION START -> DO SCRIPT FILE -> TrainingRange.lua
 --   4. Full documentation and wiki: see the GitHub repository.
 --
--- REQUIRED ZONES IN THE MISSION EDITOR (type: Circle):
---   TR_BOMBING        radius ~3000m    bombing range
+-- REQUIRED ZONES IN THE MISSION EDITOR (Circle, the tanker zones may also be Quad):
+--   TR_BOMBING        radius ~3000m    unarmoured targets (Ural) spawn inside
+--   TR_ARMOR_LIGHT    radius ~3000m    light armour (BTR-80) spawns inside
+--   TR_ARMOR_HEAVY    radius ~3000m    heavy armour (T-90) spawns inside
 --   TR_DOGFIGHT       radius ~15000m   dogfight arena
 --   TR_SEAD_RADAR     radius ~8000m    radar SAM zone (SAM spawns at a random point inside)
 --   TR_SEAD_IR        radius ~5000m    IR / AAA zone (threat spawns at a random point inside)
---   TR_CARRIER        radius ~2000m    carrier strike group spawns at the zone centre
---   TR_REFUEL_BASKET  radius ~10000m   basket tanker orbit anchor (random point inside)
---   TR_REFUEL_BOOM    radius ~10000m   boom tanker orbit anchor (random point inside)
+--   TR_CARRIER        radius ~2000m    carrier strike group spawns here at mission start
+--   TR_REFUEL_BASKET  radius ~10000m   basket tanker racetrack (fits inside, circle or quad)
+--   TR_REFUEL_BOOM    radius ~10000m   boom tanker racetrack (fits inside, circle or quad)
 --
--- Every spawn location is an ME zone now, so there are no x/z coordinates to
--- enter by hand. Place the zones where you want the activity to happen.
+-- Every spawn location is an ME zone, so there are no x/z coordinates to enter
+-- by hand. Place the zones where you want the activity to happen.
 --
 -- EDITABLE PARAMETERS:
 -- Everything you are meant to tune lives in the TR_Config block below.
@@ -39,10 +41,14 @@ TR_Config = {
     -- BOMBING RANGE
     -- -----------------------------------------------------------------------
     bombing = {
-        zone       = "TR_BOMBING",           -- ME zone name, must match exactly
-        minSpacing = 500,                    -- minimum metres between static targets
+        zone       = "TR_BOMBING",           -- ME zone, unarmoured targets spawn inside
+        lightZone  = "TR_ARMOR_LIGHT",       -- ME zone, light armour (BTR-80) spawns inside
+        heavyZone  = "TR_ARMOR_HEAVY",       -- ME zone, heavy armour (T-90) spawns inside
+        minSpacing = 500,                    -- minimum metres between targets
         smokeColor = trigger.smokeColor.Red, -- Red / Green / White / Orange / Blue
-        staticUnit = "Infantry AK",          -- target unit type (exact DCS string)
+        staticUnit = "Ural-375",             -- unarmoured target (visible truck)
+        lightUnit  = "BTR-80",               -- light armour target
+        heavyUnit  = "T-90",                 -- heavy armour target
     },
     -- -----------------------------------------------------------------------
     -- DOGFIGHT ZONE
@@ -92,18 +98,18 @@ TR_Config = {
     refueling = {
         basket = {
             type    = "KC135MPRS",        -- probe-and-drogue tanker (exact DCS type)
-            zone    = "TR_REFUEL_BASKET", -- ME zone, orbit anchored at a random point inside
+            zone    = "TR_REFUEL_BASKET", -- ME zone (circle OR quad), racetrack fits inside it
             alt     = 6000,               -- altitude in metres
-            speed   = 480,                -- speed in km/h
-            heading = 090,                -- track heading in degrees
+            mach    = 0.45,               -- default speed (Mach), changeable from the menu
+            heading = 090,                -- racetrack heading in degrees
             tacan   = { channel = 51, mode = "Y", callsign = "TKR" },
             freq    = 251.0,              -- AM frequency in MHz
         },
         boom = {
             type    = "KC-135",           -- boom tanker (exact DCS type, keep the hyphen)
-            zone    = "TR_REFUEL_BOOM",   -- ME zone, orbit anchored at a random point inside
+            zone    = "TR_REFUEL_BOOM",   -- ME zone (circle OR quad), racetrack fits inside it
             alt     = 7000,
-            speed   = 500,
+            mach    = 0.55,
             heading = 090,
             tacan   = { channel = 52, mode = "Y", callsign = "TKB" },
             freq    = 252.0,
@@ -143,11 +149,11 @@ end
 -- ===========================================================================
 -- MODULE STATE  (globals per spec; guarded with `or` so a reload keeps state)
 -- ===========================================================================
-TR_Bombing   = TR_Bombing   or { staticGroups = {}, convoyGroup = nil, targets = {} }
+TR_Bombing   = TR_Bombing   or { staticGroups = {}, lightGroups = {}, heavyGroups = {}, convoyGroup = nil, targets = {} }
 TR_Dogfight  = TR_Dogfight  or { players = {} }                       -- [unitName] = { score, entryTime }
 TR_SEAD      = TR_SEAD      or { radarActive = nil, irActive = nil, players = {} }
-TR_Carrier   = TR_Carrier   or { spawned = false, recoveryTanker = nil }
-TR_Refueling = TR_Refueling or { basket = nil, boom = nil }
+TR_Carrier   = TR_Carrier   or { spawned = false, recoveryTanker = nil, heading = 270, speed = nil, roe = "defend" }
+TR_Refueling = TR_Refueling or { basket = nil, boom = nil, basketMach = nil, boomMach = nil }
 
 -- ===========================================================================
 -- CONSTANTS
@@ -155,6 +161,7 @@ TR_Refueling = TR_Refueling or { basket = nil, boom = nil }
 local KT_TO_MS  = 0.514444   -- knots  -> m/s
 local KMH_TO_MS = 1 / 3.6    -- km/h   -> m/s
 local MS_TO_KT  = 1.94384    -- m/s    -> knots
+local MACH_MS   = 310        -- approx speed of sound (m/s) near tanker altitude; Mach -> m/s
 
 local CONVOY_SPEED = 5.56    -- m/s (~20 km/h); convoy is a slow moving target
 
@@ -248,6 +255,53 @@ local function _randomLandPointInZone(zone, margin, tries)
         if _surfaceOk(p.x, p.z) then return p end
     end
     return _randomPointInZone(zone, margin) -- give up on land, return anything in zone
+end
+
+-- Resolve an ME zone whether it is a Circle (trigger.misc.getZone) or a Quad
+-- (read from env.mission, since trigger.misc.getZone returns nil for polygons).
+-- Returns { cx, cz, inradius }, where inradius is the largest circle centred on
+-- the centroid that still fits, enough to lay a racetrack inside the zone.
+local function _resolveZone(name)
+    local c = trigger.misc.getZone(name)
+    if c then return { cx = c.point.x, cz = c.point.z, inradius = c.radius } end
+    if env and env.mission and env.mission.triggers and env.mission.triggers.zones then
+        for _, z in ipairs(env.mission.triggers.zones) do
+            if z.name == name then
+                local verts = z.verticies or z.vertices or z.points -- DCS ships the "verticies" typo
+                if verts and #verts >= 3 then
+                    local pts, cx, cz = {}, 0, 0
+                    for _, v in ipairs(verts) do
+                        local vx, vz = v.x or 0, v.y or v.z or 0 -- mission-file vertex: y = world z
+                        pts[#pts + 1] = { x = vx, z = vz }; cx = cx + vx; cz = cz + vz
+                    end
+                    cx, cz = cx / #pts, cz / #pts
+                    local inr = math.huge
+                    for i = 1, #pts do
+                        local a, b = pts[i], pts[(i % #pts) + 1]
+                        local dx, dz = b.x - a.x, b.z - a.z
+                        local len = math.sqrt(dx * dx + dz * dz)
+                        if len > 1 then
+                            local d = math.abs(dx * (a.z - cz) - dz * (a.x - cx)) / len
+                            if d < inr then inr = d end
+                        end
+                    end
+                    return { cx = cx, cz = cz, inradius = inr }
+                end
+            end
+        end
+    end
+    _out("[Training Range] Zone not found: " .. tostring(name), 15)
+    return nil
+end
+
+-- Two racetrack endpoints centred in the zone, on the given heading, sized so
+-- the whole pattern (turns included) stays inside the zone's area.
+local function _racetrackInZone(zr, headingDeg)
+    local half = math.max(2000, zr.inradius - 3000) -- leave ~3 km for the orbit turns
+    local rad = math.rad(headingDeg)
+    local hx, hz = math.sin(rad), math.cos(rad)
+    return { x = zr.cx - hx * half, z = zr.cz - hz * half },
+           { x = zr.cx + hx * half, z = zr.cz + hz * half }
 end
 
 local function _destroyGroupByName(name)
@@ -346,6 +400,19 @@ local function _setGroundCombatReady(groupName)
     end, nil, timer.getTime() + 1.0)
 end
 
+-- Bombing targets must not shoot back (BTR/T-90 carry guns). Weapon hold plus
+-- green alarm keeps them passive. Applied on the same post-spawn delay.
+local function _setGroundWeaponHold(groupName)
+    timer.scheduleFunction(function()
+        local g = Group.getByName(groupName)
+        if not g then return nil end
+        local ctrl = g:getController()
+        pcall(function() ctrl:setOption(AI.Option.Ground.id.ROE, AI.Option.Ground.val.ROE.WEAPON_HOLD) end)
+        pcall(function() ctrl:setOption(AI.Option.Ground.id.ALARM_STATE, AI.Option.Ground.val.ALARM_STATE.GREEN) end)
+        return nil
+    end, nil, timer.getTime() + 1.0)
+end
+
 -- ---------------------------------------------------------------------------
 -- Tanker spawn (shared by Basket, Boom and the carrier S-3B).
 -- A working tanker needs THREE things, which is why "task = Refueling" alone
@@ -355,10 +422,8 @@ end
 --   3) an Orbit (Race-Track)    -> keeps it on a predictable track
 -- ---------------------------------------------------------------------------
 local function _spawnTanker(opts)
-    local rad = math.rad(opts.headingDeg or 90)
-    local leg = opts.legLength or 30000
-    local p1  = { x = opts.center.x, z = opts.center.z }
-    local p2  = { x = opts.center.x + math.sin(rad) * leg, z = opts.center.z + math.cos(rad) * leg }
+    local p1, p2 = opts.wp1, opts.wp2
+    local hdg = math.atan2(p2.x - p1.x, p2.z - p1.z) -- face the far end of the racetrack
 
     local wp1tasks = {
         [1] = { id = "Tanker", params = {} },
@@ -402,7 +467,7 @@ local function _spawnTanker(opts)
             ["x"]        = p1.x, ["y"] = p1.z,
             ["alt"]      = opts.alt, ["alt_type"] = "BARO",
             ["speed"]    = opts.speedMS,
-            ["heading"]  = rad,
+            ["heading"]  = hdg,
             ["skill"]    = "High",
             ["payload"]  = { ["pylons"] = {}, ["fuel"] = "100000", ["flare"] = 0, ["chaff"] = 0, ["gun"] = 100 },
         } },
@@ -417,12 +482,21 @@ end
 -- ===========================================================================
 -- MODULE: BOMBING RANGE
 -- ===========================================================================
-local function _bombingClearStatics()
-    for _, name in ipairs(TR_Bombing.staticGroups) do
+-- Three target kinds, each with its own ME zone, unit type, name prefix and
+-- tracking list in TR_Bombing.
+local BOMB_KINDS = {
+    static = { zoneKey = "zone",      unitKey = "staticUnit", prefix = "TR_STATIC_",  listKey = "staticGroups", label = "target" },
+    light  = { zoneKey = "lightZone", unitKey = "lightUnit",  prefix = "TR_ARMOR_L_", listKey = "lightGroups",  label = "light armour" },
+    heavy  = { zoneKey = "heavyZone", unitKey = "heavyUnit",  prefix = "TR_ARMOR_H_", listKey = "heavyGroups",  label = "heavy armour" },
+}
+
+local function _bombingClearKind(kind)
+    local k = BOMB_KINDS[kind]
+    for _, name in ipairs(TR_Bombing[k.listKey]) do
         _destroyGroupByName(name)
         TR_Bombing.targets[name] = nil
     end
-    TR_Bombing.staticGroups = {}
+    TR_Bombing[k.listKey] = {}
 end
 
 -- Rejection sampling for N points at least minSpacing apart inside the zone.
@@ -439,22 +513,25 @@ local function _generateSpacedPoints(zone, count, minSpacing, margin)
     return pts
 end
 
-local function _bombingSpawnStatics(count)
-    local zone = _getZone(TR_Config.bombing.zone); if not zone then return end
-    _bombingClearStatics()
+local function _bombingSpawn(kind, count)
+    local k = BOMB_KINDS[kind]; if not k then return end
+    local zone = _getZone(TR_Config.bombing[k.zoneKey]); if not zone then return end
+    _bombingClearKind(kind)
     local pts = _generateSpacedPoints(zone, count, TR_Config.bombing.minSpacing, 100)
     if #pts < count then
-        _out("[Bombing Range] Only placed " .. #pts .. " of " .. count .. " targets (spacing/zone limit).", 12)
+        _out("[Bombing Range] Only placed " .. #pts .. " of " .. count .. " (spacing/zone limit).", 12)
     end
+    local unit = TR_Config.bombing[k.unitKey]
     for i, p in ipairs(pts) do
-        local name = "TR_STATIC_" .. i
-        _spawnGround(name, { TR_Config.bombing.staticUnit }, p, ENEMY_COUNTRY)
-        TR_Bombing.staticGroups[#TR_Bombing.staticGroups + 1] = name
+        local name = k.prefix .. i
+        _spawnGround(name, { unit }, p, ENEMY_COUNTRY)
+        _setGroundWeaponHold(name) -- targets never shoot back
+        TR_Bombing[k.listKey][#TR_Bombing[k.listKey] + 1] = name
         TR_Bombing.targets[name] = 1
         local sx, sz = p.x + 50, p.z -- smoke 50 m to the side so it marks each target
         trigger.action.smoke({ x = sx, y = _groundY(sx, sz), z = sz }, TR_Config.bombing.smokeColor)
     end
-    if #pts > 0 then _out("[Bombing Range] Spawned " .. #pts .. " target(s).", 10) end
+    if #pts > 0 then _out("[Bombing Range] Spawned " .. #pts .. " " .. k.label .. " target(s).", 10) end
 end
 
 local function _bombingSpawnConvoy()
@@ -510,13 +587,16 @@ local function _bombingSpawnConvoy()
         ["route"] = { ["points"] = points },
     }
     pcall(function() coalition.addGroup(ENEMY_COUNTRY, Group.Category.GROUND, groupData) end)
+    _setGroundWeaponHold("TR_CONVOY") -- BRDM-2 has a gun, keep it passive
     TR_Bombing.convoyGroup = "TR_CONVOY"
     TR_Bombing.targets["TR_CONVOY"] = 3
     _out("[Bombing Range] Convoy of 3 BRDM-2 rolling.", 10)
 end
 
 local function _bombingReset()
-    _bombingClearStatics()
+    _bombingClearKind("static")
+    _bombingClearKind("light")
+    _bombingClearKind("heavy")
     if TR_Bombing.convoyGroup then
         _destroyGroupByName(TR_Bombing.convoyGroup)
         TR_Bombing.convoyGroup = nil
@@ -667,14 +747,45 @@ local function _carrierWind(cp)
     return course, kt
 end
 
+-- Apply the group ROE: ENGAGE = weapons free, DEFEND = return fire only (so the
+-- group does not open up on ground units it sails past).
+local function _carrierApplyROE()
+    local g = Group.getByName(TR_Config.carrier.groupName)
+    if not g then return end
+    local val = (TR_Carrier.roe == "engage")
+        and AI.Option.Ground.val.ROE.OPEN_FIRE or AI.Option.Ground.val.ROE.RETURN_FIRE
+    pcall(function() g:getController():setOption(AI.Option.Ground.id.ROE, val) end)
+end
+
+-- Re-task the whole formation onto a heading at a speed. The escorts hold their
+-- spawn-relative stations, so the screen turns with the carrier.
+local function _carrierSteer(headingDeg, speedKt)
+    local u = Unit.getByName(TR_Config.carrier.unitName)
+    if not u then return end
+    local cp = u:getPoint()
+    local speedMS = speedKt * KT_TO_MS
+    local rad = math.rad(headingDeg)
+    local far = { x = cp.x + math.sin(rad) * 55560, z = cp.z + math.cos(rad) * 55560 }
+    local function _shipWP(x, z)
+        return { ["x"] = x, ["y"] = z, ["type"] = "Turning Point", ["action"] = "Turning Point",
+                 ["speed"] = speedMS, ["task"] = { id = "ComboTask", params = { tasks = {} } } }
+    end
+    local task = { id = "Mission", params = { route = { points = {
+        [1] = _shipWP(cp.x, cp.z), [2] = _shipWP(far.x, far.z),
+    } } } }
+    _applyTaskStaggered(u:getGroup():getController(), task)
+end
+
 local function _carrierSpawn()
     if TR_Carrier.spawned and Unit.getByName(TR_Config.carrier.unitName) then
         _out("[Carrier] Already on station."); return
     end
     local zone = _getZone(TR_Config.carrier.zone); if not zone then return end
+    TR_Carrier.speed   = TR_Carrier.speed or TR_Config.carrier.speed
+    TR_Carrier.heading = TR_Carrier.heading or 270
     local cx, cz = zone.point.x, zone.point.z
-    local speedMS = TR_Config.carrier.speed * KT_TO_MS
-    local h = math.rad(270)                       -- initial heading 270
+    local speedMS = TR_Carrier.speed * KT_TO_MS
+    local h = math.rad(TR_Carrier.heading)        -- current commanded heading
     local fwdx, fwdz = math.sin(h), math.cos(h)   -- carrier-frame forward (along heading)
     local stbx, stbz = math.cos(h), -math.sin(h)  -- carrier-frame starboard (to the right)
 
@@ -708,26 +819,17 @@ local function _carrierSpawn()
     local grp
     pcall(function() grp = coalition.addGroup(FRIENDLY_COUNTRY, Group.Category.SHIP, groupData) end)
     TR_Carrier.spawned = (grp ~= nil)
-    _out(string.format("[Carrier] Strike group on station, steaming 270 at %d kt (carrier plus %d escorts).",
-         TR_Config.carrier.speed, #units - 1), 12)
+    timer.scheduleFunction(function() _carrierApplyROE(); return nil end, nil, timer.getTime() + 1.0)
+    _out(string.format("[Carrier] Strike group on station, steaming %03d at %d kt (carrier plus %d escorts).",
+         TR_Carrier.heading, TR_Carrier.speed, #units - 1), 12)
 end
 
 local function _carrierRecovery()
     local u = Unit.getByName(TR_Config.carrier.unitName)
     if not u then _out("[Carrier] Carrier not on station."); return end
-    local cp = u:getPoint()
-    local course, kt = _carrierWind(cp)
-    local rad = math.rad(course)
-    local far = { x = cp.x + math.sin(rad) * 55560, z = cp.z + math.cos(rad) * 55560 } -- ~30 NM
-    local speedMS = TR_Config.carrier.speed * KT_TO_MS
-    local function _shipWP(x, z)
-        return { ["x"] = x, ["y"] = z, ["type"] = "Turning Point", ["action"] = "Turning Point",
-                 ["speed"] = speedMS, ["task"] = { id = "ComboTask", params = { tasks = {} } } }
-    end
-    local task = { id = "Mission", params = { route = { points = {
-        [1] = _shipWP(cp.x, cp.z), [2] = _shipWP(far.x, far.z),
-    } } } }
-    _applyTaskStaggered(u:getGroup():getController(), task)
+    local course, kt = _carrierWind(u:getPoint())
+    TR_Carrier.heading = course
+    _carrierSteer(course, TR_Carrier.speed or TR_Config.carrier.speed)
     _out(string.format("[Carrier] Recovery course %03d (into wind) | Wind %d kt from %03d.",
          _round(course) % 360, _round(kt), _round(course) % 360), 15)
 end
@@ -741,6 +843,19 @@ local function _carrierDeckStatus()
          _round(course) % 360, _round(kt), _round(course) % 360, case), 15)
 end
 
+local function _carrierSetSpeed(kt)
+    TR_Carrier.speed = kt
+    _carrierSteer(TR_Carrier.heading or 270, kt)
+    _out("[Carrier] Speed set to " .. kt .. " kt.", 10)
+end
+
+local function _carrierSetROE(mode)
+    TR_Carrier.roe = (mode == "engage") and "engage" or "defend"
+    timer.scheduleFunction(function() _carrierApplyROE(); return nil end, nil, timer.getTime() + 0.3)
+    _out("[Carrier] Group ROE: " ..
+         (TR_Carrier.roe == "engage" and "ENGAGE (weapons free)." or "DEFEND only (return fire)."), 10)
+end
+
 local function _carrierTanker()
     if TR_Carrier.recoveryTanker and Group.getByName(TR_Carrier.recoveryTanker) then
         _out("[Carrier] Recovery tanker already airborne."); return
@@ -752,10 +867,14 @@ local function _carrierTanker()
         base = z and { x = z.point.x, z = z.point.z } or { x = 0, z = 0 }
     end
     local off = TR_Config.carrier.recoveryTankerOffset
+    local cx, cz = base.x + off.x, base.z + off.z
+    local rad, half = math.rad(90), 12000
+    local wp1 = { x = cx - math.sin(rad) * half, z = cz - math.cos(rad) * half }
+    local wp2 = { x = cx + math.sin(rad) * half, z = cz + math.cos(rad) * half }
     local grp = _spawnTanker({
         name = "TR_S3_TANKER", type = "S-3B Tanker",
         alt = TR_Config.carrier.recoveryTankerAlt, speedMS = TR_Config.carrier.recoveryTankerSpeed * KMH_TO_MS,
-        headingDeg = 90, center = { x = base.x + off.x, z = base.z + off.z },
+        wp1 = wp1, wp2 = wp2,
         freq = TR_Config.carrier.recoveryTankerFreq, tacan = TR_Config.carrier.recoveryTankerTacan,
     })
     TR_Carrier.recoveryTanker = grp and "TR_S3_TANKER" or nil
@@ -779,7 +898,9 @@ local function _carrierReset()
     _destroyGroupByName(TR_Carrier.recoveryTanker)
     TR_Carrier.spawned = false
     TR_Carrier.recoveryTanker = nil
-    _out("[Carrier] Reset done.")
+    TR_Carrier.heading = 270
+    _carrierSpawn() -- back on station at the zone
+    _out("[Carrier] Reset, strike group back on station.")
 end
 
 -- ===========================================================================
@@ -787,24 +908,50 @@ end
 -- ===========================================================================
 local _refuelNames = { basket = "TR_TANKER_BASKET", boom = "TR_TANKER_BOOM" }
 
+local function _refuelLabel(which) return (which == "basket") and "Basket" or "Boom" end
+
 local function _refuelSpawn(which)
     local c = TR_Config.refueling[which]
-    local label = (which == "basket") and "Basket" or "Boom"
+    local label = _refuelLabel(which)
     if TR_Refueling[which] and Group.getByName(TR_Refueling[which]) then
         _out("[Refueling] " .. label .. " tanker already in service."); return
     end
-    local zone = _getZone(c.zone); if not zone then return end
-    local anchor = _randomPointInZone(zone, 1000) -- orbit anchor inside the zone
+    local zr = _resolveZone(c.zone); if not zr then return end
+    local mach = TR_Refueling[which .. "Mach"] or c.mach
+    TR_Refueling[which .. "Mach"] = mach
+    local wp1, wp2 = _racetrackInZone(zr, c.heading) -- both legs inside the zone
     local name = _refuelNames[which]
     local grp = _spawnTanker({
-        name = name, type = c.type,
-        alt = c.alt, speedMS = c.speed * KMH_TO_MS, headingDeg = c.heading,
-        center = anchor,
-        freq = c.freq, tacan = c.tacan,
+        name = name, type = c.type, alt = c.alt, speedMS = mach * MACH_MS,
+        wp1 = wp1, wp2 = wp2, freq = c.freq, tacan = c.tacan,
     })
     TR_Refueling[which] = grp and name or nil
-    _out(string.format("[Refueling] Tanker %s | Freq: %.1f AM | TACAN: %d%s %s.",
-         label, c.freq, c.tacan.channel, c.tacan.mode, c.tacan.callsign), 15)
+    _out(string.format("[Refueling] Tanker %s | Mach %.1f | Freq: %.1f AM | TACAN: %d%s %s.",
+         label, mach, c.freq, c.tacan.channel, c.tacan.mode, c.tacan.callsign), 15)
+end
+
+-- Change a live tanker's speed (re-task its racetrack at the new Mach).
+local function _refuelSetSpeed(which, mach)
+    TR_Refueling[which .. "Mach"] = mach
+    local name = TR_Refueling[which]
+    local g = name and Group.getByName(name)
+    if not g then _out("[Refueling] " .. _refuelLabel(which) .. " tanker not in service."); return end
+    local c = TR_Config.refueling[which]
+    local zr = _resolveZone(c.zone); if not zr then return end
+    local wp1, wp2 = _racetrackInZone(zr, c.heading)
+    local speedMS = mach * MACH_MS
+    local function _wp(p, tasks)
+        return { ["x"] = p.x, ["y"] = p.z, ["alt"] = c.alt, ["alt_type"] = "BARO",
+                 ["type"] = "Turning Point", ["action"] = "Turning Point",
+                 ["speed"] = speedMS, ["task"] = { id = "ComboTask", params = { tasks = tasks or {} } } }
+    end
+    local task = { id = "Mission", params = { route = { points = {
+        [1] = _wp(wp1, { [1] = { id = "Tanker", params = {} },
+                         [2] = { id = "Orbit", params = { pattern = "Race-Track", speed = speedMS, altitude = c.alt } } }),
+        [2] = _wp(wp2),
+    } } } }
+    _applyTaskStaggered(g:getController(), task)
+    _out(string.format("[Refueling] %s tanker speed set to Mach %.1f.", _refuelLabel(which), mach), 10)
 end
 
 local function _refuelRemove(which)
@@ -889,11 +1036,22 @@ local function _buildMenu()
 
     -- Bombing Range
     local mB = missionCommands.addSubMenu("Bombing Range", root)
-    missionCommands.addCommand("Spawn 1 target",   mB, function() _bombingSpawnStatics(1) end)
-    missionCommands.addCommand("Spawn 3 targets",  mB, function() _bombingSpawnStatics(3) end)
-    missionCommands.addCommand("Spawn 5 targets",  mB, function() _bombingSpawnStatics(5) end)
-    missionCommands.addCommand("Spawn 10 targets", mB, function() _bombingSpawnStatics(10) end)
-    missionCommands.addCommand("Spawn convoy",     mB, function() _bombingSpawnConvoy() end)
+    local mBs = missionCommands.addSubMenu("Static (Ural)", mB)
+    missionCommands.addCommand("Spawn 1",  mBs, function() _bombingSpawn("static", 1) end)
+    missionCommands.addCommand("Spawn 3",  mBs, function() _bombingSpawn("static", 3) end)
+    missionCommands.addCommand("Spawn 5",  mBs, function() _bombingSpawn("static", 5) end)
+    missionCommands.addCommand("Spawn 10", mBs, function() _bombingSpawn("static", 10) end)
+    local mBl = missionCommands.addSubMenu("Light armour (BTR-80)", mB)
+    missionCommands.addCommand("Spawn 1",  mBl, function() _bombingSpawn("light", 1) end)
+    missionCommands.addCommand("Spawn 3",  mBl, function() _bombingSpawn("light", 3) end)
+    missionCommands.addCommand("Spawn 5",  mBl, function() _bombingSpawn("light", 5) end)
+    missionCommands.addCommand("Spawn 10", mBl, function() _bombingSpawn("light", 10) end)
+    local mBh = missionCommands.addSubMenu("Heavy armour (T-90)", mB)
+    missionCommands.addCommand("Spawn 1",  mBh, function() _bombingSpawn("heavy", 1) end)
+    missionCommands.addCommand("Spawn 3",  mBh, function() _bombingSpawn("heavy", 3) end)
+    missionCommands.addCommand("Spawn 5",  mBh, function() _bombingSpawn("heavy", 5) end)
+    missionCommands.addCommand("Spawn 10", mBh, function() _bombingSpawn("heavy", 10) end)
+    missionCommands.addCommand("Spawn convoy",        mB, function() _bombingSpawnConvoy() end)
     missionCommands.addCommand("Reset Bombing Range", mB, function() _bombingReset() end)
 
     -- SEAD Range
@@ -914,19 +1072,36 @@ local function _buildMenu()
     missionCommands.addCommand("Remove IR/AAA",           mSi, function() _seadRemoveIR() end)
     missionCommands.addCommand("Reset SEAD Range", mS, function() _seadReset() end)
 
-    -- Carrier Ops
+    -- Carrier Ops (the strike group is already on station from mission start)
     local mC = missionCommands.addSubMenu("Carrier Ops", root)
-    missionCommands.addCommand("Spawn Carrier",              mC, function() _carrierSpawn() end)
+    local mCs = missionCommands.addSubMenu("Set speed", mC)
+    missionCommands.addCommand("10 kt", mCs, function() _carrierSetSpeed(10) end)
+    missionCommands.addCommand("15 kt", mCs, function() _carrierSetSpeed(15) end)
+    missionCommands.addCommand("20 kt", mCs, function() _carrierSetSpeed(20) end)
+    missionCommands.addCommand("25 kt", mCs, function() _carrierSetSpeed(25) end)
+    local mCr = missionCommands.addSubMenu("Group ROE", mC)
+    missionCommands.addCommand("Engage (weapons free)",     mCr, function() _carrierSetROE("engage") end)
+    missionCommands.addCommand("Defend only (return fire)", mCr, function() _carrierSetROE("defend") end)
     missionCommands.addCommand("Call recovery",             mC, function() _carrierRecovery() end)
     missionCommands.addCommand("Deck status",               mC, function() _carrierDeckStatus() end)
     missionCommands.addCommand("Spawn S-3B Recovery Tanker", mC, function() _carrierTanker() end)
     missionCommands.addCommand("Remove S-3B",               mC, function() _carrierRemoveTanker() end)
-    missionCommands.addCommand("Reset Carrier Ops",         mC, function() _carrierReset() end)
+    missionCommands.addCommand("Respawn carrier",           mC, function() _carrierReset() end)
 
     -- Refueling
     local mR = missionCommands.addSubMenu("Refueling", root)
     missionCommands.addCommand("Spawn Basket tanker",  mR, function() _refuelSpawn("basket") end)
     missionCommands.addCommand("Spawn Boom tanker",    mR, function() _refuelSpawn("boom") end)
+    local mRb = missionCommands.addSubMenu("Basket speed", mR)
+    missionCommands.addCommand("Mach 0.3", mRb, function() _refuelSetSpeed("basket", 0.3) end)
+    missionCommands.addCommand("Mach 0.4", mRb, function() _refuelSetSpeed("basket", 0.4) end)
+    missionCommands.addCommand("Mach 0.5", mRb, function() _refuelSetSpeed("basket", 0.5) end)
+    missionCommands.addCommand("Mach 0.6", mRb, function() _refuelSetSpeed("basket", 0.6) end)
+    local mRo = missionCommands.addSubMenu("Boom speed", mR)
+    missionCommands.addCommand("Mach 0.3", mRo, function() _refuelSetSpeed("boom", 0.3) end)
+    missionCommands.addCommand("Mach 0.4", mRo, function() _refuelSetSpeed("boom", 0.4) end)
+    missionCommands.addCommand("Mach 0.5", mRo, function() _refuelSetSpeed("boom", 0.5) end)
+    missionCommands.addCommand("Mach 0.6", mRo, function() _refuelSetSpeed("boom", 0.6) end)
     missionCommands.addCommand("Remove Basket tanker", mR, function() _refuelRemove("basket") end)
     missionCommands.addCommand("Remove Boom tanker",   mR, function() _refuelRemove("boom") end)
     missionCommands.addCommand("Reset Refueling",      mR, function() _refuelReset() end)
@@ -954,6 +1129,10 @@ if not TR_Initialized then
     local sdi = math.max(1, TR_Config.sead.pollInterval)
     timer.scheduleFunction(function(_, time) pcall(_seadTick); return time + sdi end,
         nil, timer.getTime() + sdi)
+
+    -- The carrier strike group is on station from mission start. Small delay so
+    -- the mission is fully loaded before the ship group spawns.
+    timer.scheduleFunction(function() pcall(_carrierSpawn); return nil end, nil, timer.getTime() + 1.0)
 
     _out("[Training Range] Ready. Open the F10 radio menu -> Training Range.", 15)
 end
