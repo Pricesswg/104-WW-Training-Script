@@ -12,6 +12,7 @@ of them or only the one you need.
 | `TrainingRange.lua` | An F10 range: bombing targets, a dogfight arena, SEAD threats, carrier ops and air-to-air tankers |
 | `TRAINING_Intercept.lua` | A scramble-intercept trainer with its own radio menu |
 | `TRAINING_GCA.lua` | A text Ground Controlled Approach that talks you down to a runway |
+| `TRAINING_AirCombat.lua` | Air-to-air arenas against RED: dogfight, BVR, and a mixed group that scales to the number of players |
 
 ---
 
@@ -113,6 +114,34 @@ If you'd rather set the runway by hand, put `CFG.auto = false` and fill in:
 
 You'll hear calls like *"Eagle1, slightly left, 5.0 miles, well above glidepath"* once a second, and it
 stops when you land or leave the zone.
+
+---
+
+## TRAINING_AirCombat.lua
+
+Three arenas against RED, each with its own zone (all Circle). The F10 menu for an arena appears only
+while you're inside its zone.
+
+| Zone name | What it's tied to |
+|---|---|
+| `TR_DOGFIGHT_RED` | Dogfight arena. Pick a type from the menu and one bandit comes up ahead of you, at the far edge of the zone, same altitude. |
+| `TR_BVR_RED` | BVR arena, same idea with a radar-missile loadout. |
+| `TR_BVR_MIXED` | Mixed group arena. A whole package comes up, sized to the number of players in the zone. |
+
+How it works:
+
+* **Dogfight and BVR** keep one bandit up at a time. Pick a type (L-39ZA, MiG-21, MiG-23, MiG-29, Su-27,
+  F-16, F-18), and it spawns in front of you across the zone. Ask for more and they queue. **Auto** brings
+  up a fresh bandit a few seconds after each kill, so you can run reps without touching the menu.
+* **Mixed** scales to the room: the threat budget is `players x difficulty` (Easy, Even, Hard), so two
+  players on Even get roughly a Su-27 plus a MiG-21, four on Hard get a heavier package, and it tops up if
+  more players join. It uses a radar loadout for a proper group BVR fight.
+* Leaving a zone despawns its bandits, and you get a "Splash" on every kill.
+
+**Loadouts:** the bandits fly **guns only out of the box** (the dogfight is fully playable like that). To
+arm them with missiles, open the `LOADOUTS` table at the top of the script and paste in the weapon CLSIDs
+for your DCS version (they change between versions, so I don't hardcode them). If a CLSID is wrong the
+bandit just falls back to guns, so nothing breaks.
 
 ---
 

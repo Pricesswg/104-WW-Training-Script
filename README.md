@@ -1,14 +1,15 @@
 # 104 WW Training Script
 
 Standalone training scripts for DCS World, built on the native scripting engine
-only (no MOOSE / MIST / CTLD). Three **independent** feature scripts, load any
+only (no MOOSE / MIST / CTLD). Four **independent** feature scripts, load any
 or all of them, in any order.
 
 | Script | What it does |
 |---|---|
 | [`TrainingRange.lua`](TrainingRange.lua) | F10 range: bombing, dogfight (immortal + scoring), SEAD (radar + IR/AAA presets), carrier ops, air-to-air refuelling |
 | [`TRAINING_Intercept.lua`](TRAINING_Intercept.lua) | Scramble-intercept trainer with a radio menu, random target launch and boundary despawn |
-| [`TRAINING_GCA.lua`](TRAINING_GCA.lua) | Text Ground Controlled Approach (talkdown to a configured runway) |
+| [`TRAINING_GCA.lua`](TRAINING_GCA.lua) | Text Ground Controlled Approach, auto-detects the runway under the zone |
+| [`TRAINING_AirCombat.lua`](TRAINING_AirCombat.lua) | Air-to-air arenas vs RED: dogfight, BVR, and a mixed group that scales to player count |
 
 In-game text and code comments are in English.
 
@@ -80,11 +81,30 @@ automatically when you start the approach. To set the runway by hand instead, us
 and fill in `runway_heading` and `threshold_point`. `glideslope_angle` (default `3.0`) is used in both
 modes.
 
+### TRAINING_AirCombat.lua
+
+Zones (type: Circle):
+
+| Zone name | Purpose |
+|---|---|
+| `TR_DOGFIGHT_RED` | Dogfight arena, the menu and the bandit appear while a player is inside |
+| `TR_BVR_RED` | BVR arena, same engine with a radar-missile loadout |
+| `TR_BVR_MIXED` | Mixed group arena, a package scaled to the number of players inside |
+
+In the dogfight and BVR arenas you pick a type (L-39ZA, MiG-21, MiG-23, MiG-29, Su-27, F-16, F-18) and one
+bandit spawns ahead of you at the far edge of the zone, same altitude. Only one is up at a time, extra
+requests queue, and **Auto** brings up a fresh one a few seconds after each kill. The mixed arena spawns a
+package whose threat budget is `players x difficulty` (Easy/Even/Hard). Leaving a zone despawns its bandits.
+
+Loadouts are **guns only by default** so the dogfight works out of the box. To arm the bandits with missiles,
+fill the `LOADOUTS` table at the top of the script with the weapon CLSIDs from your DCS version (they are
+version-specific, so they are not hardcoded). A bad CLSID falls back to guns automatically.
+
 ---
 
 ## Notes
 
-* The three scripts share no state and can be used à la carte.
-* Dogfight and SEAD zones make players immortal while inside (training, no real losses).
+* The four scripts share no state and can be used à la carte.
+* Dogfight and SEAD zones in `TrainingRange.lua` make players immortal while inside (training, no real losses).
 * Requires a reasonably recent DCS build. A couple of unit type strings and the TACAN beacon
   parameters can vary by version, so check the in-game messages if a spawn fails.
