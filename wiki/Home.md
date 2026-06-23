@@ -148,11 +148,13 @@ bandit just falls back to guns, so nothing breaks.
 
 ## JTAC.lua
 
-Standalone, you can drop it into any mission. One zone (Circle), placed with line of sight to the targets:
+Standalone, you can drop it into any mission. Two zones (Circle), so the ground JTAC and the drone each get
+their own spot (create whichever you use):
 
 | Zone name | What it's tied to |
 |---|---|
-| `JTAC_ZONE` | The ground JTAC sits at the centre; the UAV orbits it. |
+| `JTAC_GROUND_ZONE` | The ground JTAC sits at its centre. Give it line of sight to the targets. |
+| `JTAC_UAV_ZONE` | The drone orbits its centre. |
 
 From the F10 menu you call up a spotter, your choice:
 

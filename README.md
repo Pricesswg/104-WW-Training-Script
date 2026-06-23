@@ -103,11 +103,12 @@ version-specific, so they are not hardcoded). A bad CLSID falls back to guns aut
 
 ### JTAC.lua
 
-Standalone (usable in any mission). Zone (type: Circle):
+Standalone (usable in any mission). Zones (type: Circle, create whichever you use):
 
 | Zone name | Purpose |
 |---|---|
-| `JTAC_ZONE` | Where the ground JTAC sits / the UAV orbits. Place it with line of sight to the targets. |
+| `JTAC_GROUND_ZONE` | The ground JTAC sits at its centre (give it line of sight to the targets) |
+| `JTAC_UAV_ZONE` | The UAV orbits its centre |
 
 From the F10 menu you spawn a **UAV spotter** (MQ-9 Reaper orbiting the zone, best line of sight) or a
 **ground JTAC** (a vehicle at the zone centre). The spotter is friendly (BLUE) and made **invisible to enemy

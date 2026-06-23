@@ -13,9 +13,9 @@
 --  is stuck on 1688, which is why we do it ourselves). The RADIO FREQUENCY is
 --  also changeable from the menu, for deconfliction with other assets.
 --
---  REQUIRED ME ZONE (type: Circle):
---    JTAC_ZONE   placed with line of sight to the targets; the ground JTAC sits
---                at its centre, the UAV orbits it.
+--  REQUIRED ME ZONES (type: Circle, create whichever one(s) you use):
+--    JTAC_GROUND_ZONE  the ground JTAC sits at its centre (needs line of sight)
+--    JTAC_UAV_ZONE     the UAV orbits its centre
 -- =========================================================
 
 -- ============== Fail-fast API guard ==============
@@ -35,7 +35,8 @@ local CFG = {
     debug           = false,
     friendlyCountry = country.id.USA,   -- the spotter is BLUE
     enemySide       = coalition.side.RED, -- it lases targets of this side
-    zone            = "JTAC_ZONE",       -- ME zone: ground JTAC sits here, UAV orbits it
+    groundZone      = "JTAC_GROUND_ZONE", -- ME zone: the ground JTAC sits at its centre
+    uavZone         = "JTAC_UAV_ZONE",    -- ME zone: the UAV orbits its centre
     groundType      = "Hummer",          -- ground JTAC vehicle (exact DCS type)
     uavType         = "MQ-9 Reaper",     -- airborne spotter (exact DCS type)
     uavAlt          = 6000,              -- UAV orbit altitude (m)
@@ -169,7 +170,7 @@ end
 
 -- ============== Spawns ==============
 local function _spawnUAV()
-    local zr = _zone(CFG.zone); if not zr then return end
+    local zr = _zone(CFG.uavZone); if not zr then return end
     _removeActive()
     local wp = {
         ["x"] = zr.cx, ["y"] = zr.cz, ["alt"] = CFG.uavAlt, ["alt_type"] = "BARO",
@@ -198,7 +199,7 @@ local function _spawnUAV()
 end
 
 local function _spawnGround()
-    local zr = _zone(CFG.zone); if not zr then return end
+    local zr = _zone(CFG.groundZone); if not zr then return end
     _removeActive()
     local gd = {
         ["name"] = GROUP_NAME, ["task"] = "Ground Nothing",
@@ -267,8 +268,8 @@ end
 -- ============== Init ==============
 if not JTAC_Initialized then
     JTAC_Initialized = true
-    if not trigger.misc.getZone(CFG.zone) then
-        _out("[JTAC] MISSING ZONE: " .. CFG.zone .. ". Create it in the Mission Editor.", 25)
+    if not (trigger.misc.getZone(CFG.groundZone) or trigger.misc.getZone(CFG.uavZone)) then
+        _out("[JTAC] Create at least one zone: " .. CFG.groundZone .. " (ground) or " .. CFG.uavZone .. " (UAV).", 25)
     end
     if not Spot then
         _out("[JTAC] WARNING: Spot API missing, the spotter will not lase in this build.", 20)
