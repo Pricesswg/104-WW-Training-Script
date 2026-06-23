@@ -10,7 +10,7 @@ or all of them, in any order.
 | [`TRAINING_Intercept.lua`](TRAINING_Intercept.lua) | Scramble-intercept trainer with a radio menu, random target launch and boundary despawn |
 | [`TRAINING_GCA.lua`](TRAINING_GCA.lua) | Text Ground Controlled Approach, auto-detects the runway under the zone |
 | [`TRAINING_AirCombat.lua`](TRAINING_AirCombat.lua) | Air-to-air arenas vs RED: dogfight, BVR, and a mixed group that scales to player count |
-| [`TRAINING_JTAC.lua`](TRAINING_JTAC.lua) | Menu-spawned invisible spotter (MQ-9 UAV or ground JTAC) that lases RED targets on a set code/frequency |
+| [`JTAC.lua`](JTAC.lua) | Menu-spawned invisible spotter (MQ-9 UAV or ground JTAC) that lases RED targets; laser code and radio frequency changeable from the menu |
 
 In-game text and code comments are in English.
 
@@ -101,20 +101,20 @@ Loadouts are **guns only by default** so the dogfight works out of the box. To a
 fill the `LOADOUTS` table at the top of the script with the weapon CLSIDs from your DCS version (they are
 version-specific, so they are not hardcoded). A bad CLSID falls back to guns automatically.
 
-### TRAINING_JTAC.lua
+### JTAC.lua
 
-Zone (type: Circle):
+Standalone (usable in any mission). Zone (type: Circle):
 
 | Zone name | Purpose |
 |---|---|
-| `TR_JTAC` | Where the ground JTAC sits / the UAV orbits. Place it on the range with line of sight to the targets. |
+| `JTAC_ZONE` | Where the ground JTAC sits / the UAV orbits. Place it with line of sight to the targets. |
 
 From the F10 menu you spawn a **UAV spotter** (MQ-9 Reaper orbiting the zone, best line of sight) or a
 **ground JTAC** (a vehicle at the zone centre). The spotter is friendly (BLUE) and made **invisible to enemy
-AI** so it is not engaged, and it autonomously lases RED targets in view. The laser code (default `1688`) and
-radio frequency (default `251.0 AM`) are set in `CFG` and announced on spawn; set your pod/bomb to the same
-code. One spotter is up at a time. (The exact FAC behaviour can vary by DCS version; `1688` is the reliable
-default.)
+AI** so it is not engaged, and it lases the nearest visible RED target. The lasing is driven by the script
+(`Spot.createLaser`), so the **laser code and the radio frequency are both changeable live from the menu**
+(default `1688` and `251.0 AM`). Change the frequency to deconflict with other assets; set your pod/bomb to
+the laser code. One spotter is up at a time.
 
 ---
 

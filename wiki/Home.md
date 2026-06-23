@@ -13,7 +13,7 @@ of them or only the one you need.
 | `TRAINING_Intercept.lua` | A scramble-intercept trainer with its own radio menu |
 | `TRAINING_GCA.lua` | A text Ground Controlled Approach that talks you down to a runway |
 | `TRAINING_AirCombat.lua` | Air-to-air arenas against RED: dogfight, BVR, and a mixed group that scales to the number of players |
-| `TRAINING_JTAC.lua` | A spotter you call from the menu (MQ-9 UAV or ground JTAC), invisible to the enemy, that lases RED targets |
+| `JTAC.lua` | A spotter you call from the menu (MQ-9 UAV or ground JTAC), invisible to the enemy, that lases RED targets with a code and frequency you can change |
 
 ---
 
@@ -146,13 +146,13 @@ bandit just falls back to guns, so nothing breaks.
 
 ---
 
-## TRAINING_JTAC.lua
+## JTAC.lua
 
-One zone (Circle), placed on the range with line of sight to the targets:
+Standalone, you can drop it into any mission. One zone (Circle), placed with line of sight to the targets:
 
 | Zone name | What it's tied to |
 |---|---|
-| `TR_JTAC` | The ground JTAC sits at the centre; the UAV orbits it. |
+| `JTAC_ZONE` | The ground JTAC sits at the centre; the UAV orbits it. |
 
 From the F10 menu you call up a spotter, your choice:
 
@@ -160,13 +160,17 @@ From the F10 menu you call up a spotter, your choice:
 * **Ground JTAC** (a vehicle at the zone centre): more realistic, but it needs clear line of sight or the
   terrain hides the targets.
 
-The spotter is friendly and **invisible to enemy AI**, so it can sit on the range and lase without getting
-shot. It works on its own: it finds and lases RED targets in view. The **laser code** (default `1688`) and
-**radio frequency** (default `251.0 AM`) live in `CFG` and are read out when it spawns, so set your pod or
-bomb to the same code. Only one spotter is up at a time, and "Remove spotter" clears it.
+The spotter is friendly and **invisible to enemy AI**, so it can sit and lase without getting shot. It finds
+and lases the nearest visible RED target on its own. The lasing is driven by the script itself
+(`Spot.createLaser`), so you can change things live from the menu:
 
-One honest note: the exact FAC behaviour shifts a little between DCS versions, so `1688` is the safe default
-code. If you need a different code and it won't take, tell me and I'll wire it to lase per target.
+* **Laser code** (default `1688`): pick a preset and it re-lases on the new code straight away. Set your pod
+  or bomb to match.
+* **Frequency** (default `251.0 AM`): pick a preset to move the spotter's radio, handy to deconflict with
+  another asset on the same frequency.
+
+Only one spotter is up at a time, "Report" reads back the current code and frequency, and "Remove spotter"
+clears it.
 
 ---
 
