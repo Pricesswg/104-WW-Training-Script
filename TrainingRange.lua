@@ -1,5 +1,5 @@
 -- ===========================================================================
--- TRAINING RANGE  (TrainingRange.lua)  v2.0
+-- TRAINING RANGE  (TrainingRange.lua)  v2.1
 -- ===========================================================================
 -- Author:     Alessandro Simonitto
 -- Repository: https://github.com/Pricesswg/104-WW-Training-Script
@@ -40,6 +40,17 @@
 -- multiplayer. Gun fire cannot be intercepted, so range AAA holds fire by
 -- default (TR_Config.sead.aaaLiveFire, also switchable from the menu).
 --
+-- BOMBING SCORES: bombs, rockets and air-to-ground missiles released by
+-- players near the range are followed to the ground; the pilot gets the
+-- distance from the nearest target, the clock position along the attack
+-- heading and a grade, and "Scores" in the menu lists everyone.
+--
+-- HARM REACTION: a range SAM an anti-radiation missile comes at switches its
+-- radar off after a few seconds and back on after the missile has gone.
+--
+-- F10 MAP: range zones, tanker tracks with their radio and TACAN, the carrier
+-- and the S-3B track are drawn on the map for the player coalition.
+--
 -- EDITABLE PARAMETERS:
 -- Everything you are meant to tune lives in the TR_Config block below.
 -- Do not change anything outside TR_Config unless you know the code.
@@ -63,6 +74,19 @@ TR_Config = {
         heavyUnit  = "T-90",                 -- heavy armour target
     },
     -- -----------------------------------------------------------------------
+    -- BOMBING SCORES: every bomb, rocket and air-to-ground missile a player
+    -- releases near the range is followed to the ground and scored against
+    -- the nearest range target (MOOSE range defaults for the grades)
+    -- -----------------------------------------------------------------------
+    scoring = {
+        enabled  = true,
+        radius   = 1000, -- impacts farther than this from every target are not scored (metres)
+        goodM    = 25,   -- GOOD within this, EXCELLENT within half of it, SHACK within 1.5 m
+        trackKm  = 30,   -- only weapons released within this distance of a bombing zone are followed
+        rockets  = true,
+        missiles = true, -- air-to-ground missiles (Maverick, Hellfire...), anti-radiation ones excluded
+    },
+    -- -----------------------------------------------------------------------
     -- DOGFIGHT ZONE
     -- -----------------------------------------------------------------------
     dogfight = {
@@ -78,6 +102,14 @@ TR_Config = {
         irZone       = "TR_SEAD_IR",    -- ME zone, IR/AAA (spawns at a random point inside)
         pollInterval = 2,               -- seconds between player checks
         aaaLiveFire  = false,           -- AAA guns: false = radar on but hold fire (guns cannot be intercepted)
+        -- HARM reaction: a site an anti-radiation missile comes at switches its
+        -- radar off after the crew's reaction time, and back on a while after
+        -- the missile has gone. Also switchable from the menu.
+        harmReaction = true,
+        harmDelay    = { 3, 10 },       -- seconds from the launch to the shutdown (random in between)
+        harmOff      = { 20, 45 },      -- seconds the radar stays off after the missile is gone
+        harmConeDeg  = 15,              -- a missile with no target counts when it flies at a site within this cone
+        harmReachKm  = 150,             -- ... and is closer than this
     },
     -- -----------------------------------------------------------------------
     -- MISSILE PROTECTION (SEAD range and dogfight arena)
@@ -157,6 +189,14 @@ TR_Config = {
         speeds = { 220, 250, 280, 310 },  -- indicated airspeeds (knots) offered in the menu
     },
     -- -----------------------------------------------------------------------
+    -- F10 MAP MARKERS: range zones, tanker tracks with their comms, the carrier
+    -- and the S-3B track, drawn for the player coalition (switchable from the menu)
+    -- -----------------------------------------------------------------------
+    markers = {
+        enabled = true,
+        zones   = true,  -- outlines and names of the range zones
+    },
+    -- -----------------------------------------------------------------------
     -- GENERAL
     -- -----------------------------------------------------------------------
     coalition = coalition.side.BLUE, -- player coalition: it gets the F10 menu and the assets
@@ -186,13 +226,20 @@ end
 -- MODULE STATE  (globals per spec; guarded with `or` so a reload keeps state)
 -- ===========================================================================
 TR_Bombing   = TR_Bombing   or { staticGroups = {}, lightGroups = {}, heavyGroups = {}, convoyGroup = nil,
-                                 targets = {}, unitGroup = {}, counted = {} }
+                                 targets = {}, unitGroup = {}, counted = {},
+                                 scores = {} }                         -- [player] = { n, sum, best, bestQ, shacks }
 TR_Dogfight  = TR_Dogfight  or { players = {} }                       -- [unitName] = { score, entryTime }
 TR_SEAD      = TR_SEAD      or { radarActive = nil, irActive = nil, irGroups = {}, rangeGroups = {},
-                                 players = {}, aaaLive = nil }
+                                 players = {}, aaaLive = nil,
+                                 emitters = {},   -- [groupName] = label, the groups with a radar
+                                 spawnSeq = {},   -- [groupName] = n, bumped at every spawn
+                                 harm = {},       -- [groupName] = HARM reaction state of that spawn
+                                 harmOn = nil }
 TR_Carrier   = TR_Carrier   or { spawned = false, recoveryTanker = nil, heading = nil, speed = nil,
-                                 roe = "defend", s3Anchor = nil }
-TR_Refueling = TR_Refueling or { basket = nil, boom = nil, basketKias = nil, boomKias = nil }
+                                 roe = "defend", s3Anchor = nil, s3Track = nil }
+TR_Refueling = TR_Refueling or { basket = nil, boom = nil, basketKias = nil, boomKias = nil,
+                                 tracks = {} }    -- [which] = { wp1, wp2, label } of the tanker in service
+TR_Markers   = TR_Markers   or { on = nil, seq = 0, ids = {}, carrierAt = nil }
 
 -- Shared with the other training scripts: every asset that sets a radio,
 -- TACAN or ICLS writes itself here, and TRAINING_Comms.lua prints the list.
@@ -218,25 +265,29 @@ local FRIENDLY_COUNTRY = country.id.USA
 -- track radar, as the DCS site templates do: the track radar alone has to find
 -- targets through its own narrow beam.
 local SEAD_RADAR_PRESETS = {
-    SA2    = { group = "TR_SAM_SA2",    units = { "SNR_75V", "p-19 s-125 sr", "S_75M_Volhov", "S_75M_Volhov" } },
-    SA3    = { group = "TR_SAM_SA3",    units = { "p-19 s-125 sr", "snr s-125 tr", "5p73 s-125 ln", "5p73 s-125 ln" } },
-    SA6    = { group = "TR_SAM_SA6",    units = { "Kub 1S91 str", "Kub 2P25 ln", "Kub 2P25 ln" } },
-    SA8    = { group = "TR_SAM_SA8",    units = { "Osa 9A33 ln", "Osa 9A33 ln" } },
-    SA11   = { group = "TR_SAM_SA11",   units = { "SA-11 Buk SR 9S18M1", "SA-11 Buk LN 9A310M1", "SA-11 Buk LN 9A310M1" } },
-    HAWK   = { group = "TR_SAM_HAWK",   units = { "Hawk sr", "Hawk tr", "Hawk ln", "Hawk ln" } },
+    SA2    = { label = "SA-2",  group = "TR_SAM_SA2",    units = { "SNR_75V", "p-19 s-125 sr", "S_75M_Volhov", "S_75M_Volhov" } },
+    SA3    = { label = "SA-3",  group = "TR_SAM_SA3",    units = { "p-19 s-125 sr", "snr s-125 tr", "5p73 s-125 ln", "5p73 s-125 ln" } },
+    SA6    = { label = "SA-6",  group = "TR_SAM_SA6",    units = { "Kub 1S91 str", "Kub 2P25 ln", "Kub 2P25 ln" } },
+    SA8    = { label = "SA-8",  group = "TR_SAM_SA8",    units = { "Osa 9A33 ln", "Osa 9A33 ln" } },
+    SA11   = { label = "SA-11", group = "TR_SAM_SA11",   units = { "SA-11 Buk SR 9S18M1", "SA-11 Buk LN 9A310M1", "SA-11 Buk LN 9A310M1" } },
+    HAWK   = { label = "Hawk",  group = "TR_SAM_HAWK",   units = { "Hawk sr", "Hawk tr", "Hawk ln", "Hawk ln" } },
     -- Rapier uses the optical tracker as specified: it engages but does NOT
-    -- emit radar, so it will not paint a player's RWR (visual threat only).
-    RAPIER = { group = "TR_SAM_RAPIER", units = { "rapier_fsa_optical_tracker_unit", "rapier_fsa_launcher", "rapier_fsa_launcher" } },
+    -- emit radar, so it will not paint a player's RWR (visual threat only),
+    -- and an anti-radiation missile has nothing to home on.
+    RAPIER = { label = "Rapier", group = "TR_SAM_RAPIER", optical = true,
+               units = { "rapier_fsa_optical_tracker_unit", "rapier_fsa_launcher", "rapier_fsa_launcher" } },
 }
 
 -- IR / AAA presets. Missile units and guns spawn as two groups ("<group>" and
 -- "<group>_GUNS"), because rules of engagement are per group and the guns are
--- the only thing the missile protection cannot stop.
+-- the only thing the missile protection cannot stop. The guns include a
+-- radar-laid Shilka, so the guns group counts as an emitter for the HARM
+-- reaction; the IR missiles do not.
 local SEAD_IR_PRESETS = {
-    IR_LIGHT   = { group = "TR_IR_LIGHT",   units = { "SA-18 Igla manpad", "SA-18 Igla manpad", "Soldier stinger", "Soldier stinger" } },
-    AAA        = { group = "TR_AAA",        guns  = { "ZSU-23-4 Shilka", "ZSU-23-4 Shilka", "ZU-23 Emplacement", "ZU-23 Emplacement" } },
-    INTEGRATED = { group = "TR_INTEGRATED", units = { "Strela-10M3", "SA-18 Igla manpad" },
-                                            guns  = { "ZSU-23-4 Shilka", "Vulcan" } },
+    IR_LIGHT   = { label = "IR (light)",         group = "TR_IR_LIGHT",   units = { "SA-18 Igla manpad", "SA-18 Igla manpad", "Soldier stinger", "Soldier stinger" } },
+    AAA        = { label = "AAA",                group = "TR_AAA",        guns  = { "ZSU-23-4 Shilka", "ZSU-23-4 Shilka", "ZU-23 Emplacement", "ZU-23 Emplacement" } },
+    INTEGRATED = { label = "Integrated Defense", group = "TR_INTEGRATED", units = { "Strela-10M3", "SA-18 Igla manpad" },
+                                                                          guns  = { "ZSU-23-4 Shilka", "Vulcan" } },
 }
 
 -- ===========================================================================
@@ -359,6 +410,11 @@ end
 -- Zones, Circle or Quad. trigger.misc.getZone gives a Quad only its centre and
 -- stored radius, as if it were a circle, so the drawn corners are read from
 -- env.mission (key "verticies", the DCS spelling; y there means world z).
+-- The editor stores them in "Z" order (1-2 one side, 3-4 the opposite side in
+-- the same direction), not around the outline: taken as they come, the test
+-- sees a bow-tie and half the zone falls outside, and the "longest side" is a
+-- diagonal. Sorted by angle around the centre they make the outline whatever
+-- the order.
 -- A shape is { cx, cz, r } for a circle, plus { poly, minx, maxx, minz, maxz }
 -- for a quad (r is then the distance of the farthest corner).
 -- ---------------------------------------------------------------------------
@@ -379,6 +435,7 @@ local function _zoneShape(name)
                         cx, cz = cx + v.x, cz + v.y
                     end
                     cx, cz = cx / #poly, cz / #poly
+                    table.sort(poly, function(a, b) return math.atan2(a.z - cz, a.x - cx) < math.atan2(b.z - cz, b.x - cx) end)
                     q = { poly = poly, cx = cx, cz = cz, r = 0,
                           minx = math.huge, maxx = -math.huge, minz = math.huge, maxz = -math.huge }
                     for _, p in ipairs(poly) do
@@ -632,6 +689,103 @@ local function _retaskTanker(groupName, wp1, wp2, alt, tas)
     return true
 end
 
+-- ---------------------------------------------------------------------------
+-- F10 map drawings (trigger.action.*ToAll, DCS 2.7+), for the player
+-- coalition, read-only. Each drawing has an id from a block of our own, far
+-- from the small numbers the players' own map marks get, and belongs to a
+-- key (an asset) so it is removed or redrawn with that asset.
+-- ---------------------------------------------------------------------------
+local MARK_BASE = 7104000
+local MARK_COLORS = {
+    bombing  = { 1, 0.55, 0, 1 },
+    dogfight = { 1, 0.25, 0.25, 1 },
+    sead     = { 0.85, 0.3, 0.85, 1 },
+    carrier  = { 0.2, 0.7, 1, 1 },
+    tanker   = { 0.2, 0.85, 0.55, 1 },
+}
+
+local function _markOn()
+    return TR_Markers.on and trigger.action.markupToAll ~= nil and trigger.action.removeMark ~= nil
+end
+
+local function _markNew(key)
+    TR_Markers.seq = TR_Markers.seq + 1
+    local id = MARK_BASE + TR_Markers.seq
+    TR_Markers.ids[key] = TR_Markers.ids[key] or {}
+    table.insert(TR_Markers.ids[key], id)
+    return id
+end
+
+local function _markClear(key)
+    for _, id in ipairs(TR_Markers.ids[key] or {}) do
+        pcall(function() trigger.action.removeMark(id) end)
+    end
+    TR_Markers.ids[key] = nil
+end
+
+local function _v3(x, z) return { x = x, y = 0, z = z } end
+local function _alpha(c, a) return { c[1], c[2], c[3], a } end
+
+local function _markText(key, x, z, text, color)
+    local id = _markNew(key)
+    pcall(function() trigger.action.textToAll(TR_Config.coalition, id, _v3(x, z), color, { 0, 0, 0, 0.35 }, 12, true, text) end)
+end
+
+-- A zone as drawn in the editor, with its name above the northern edge.
+local function _markZone(key, zoneName, label, color)
+    local s = _zoneShape(zoneName); if not s then return end
+    local id, side, fill = _markNew(key), TR_Config.coalition, _alpha(color, 0.08)
+    if s.poly and #s.poly == 4 then
+        local p = s.poly
+        pcall(function() trigger.action.quadToAll(side, id, _v3(p[1].x, p[1].z), _v3(p[2].x, p[2].z),
+            _v3(p[3].x, p[3].z), _v3(p[4].x, p[4].z), color, fill, 1, true, "") end)
+    elseif s.poly then
+        local args = { 7, side, id } -- freeform polygon
+        for _, q in ipairs(s.poly) do args[#args + 1] = _v3(q.x, q.z) end
+        for _, a in ipairs({ color, fill, 1, true, "" }) do args[#args + 1] = a end
+        pcall(function() trigger.action.markupToAll(unpack(args)) end)
+    else
+        pcall(function() trigger.action.circleToAll(side, id, _v3(s.cx, s.cz), s.r, color, fill, 1, true, "") end)
+    end
+    _markText(key, (s.poly and s.maxx or (s.cx + s.r)) + 800, s.cz, label, color)
+end
+
+-- A racetrack: the leg the aircraft flies, its two turn points and a label
+-- beside the middle of the leg.
+local function _markTrack(key, wp1, wp2, color, label)
+    _markClear(key)
+    if not _markOn() then return end
+    local side = TR_Config.coalition
+    local id = _markNew(key)
+    pcall(function() trigger.action.lineToAll(side, id, _v3(wp1.x, wp1.z), _v3(wp2.x, wp2.z), color, 2, true, "") end)
+    for _, p in ipairs({ wp1, wp2 }) do
+        local cid = _markNew(key)
+        pcall(function() trigger.action.circleToAll(side, cid, _v3(p.x, p.z), 600, color, _alpha(color, 0.25), 1, true, "") end)
+    end
+    local dx, dz = wp2.x - wp1.x, wp2.z - wp1.z
+    local l = math.max(1, math.sqrt(dx * dx + dz * dz))
+    _markText(key, (wp1.x + wp2.x) / 2 - dz / l * 2500, (wp1.z + wp2.z) / 2 + dx / l * 2500, label, color)
+end
+
+-- The carrier: a 1 NM ring on the ship and its comms line.
+local function _markCarrier()
+    _markClear("carrier")
+    TR_Markers.carrierAt = nil
+    if not _markOn() then return end
+    local c = TR_Config.carrier
+    local u = Unit.getByName(c.unitName); if not u then return end
+    local p = u:getPoint()
+    local id = _markNew("carrier")
+    pcall(function() trigger.action.circleToAll(TR_Config.coalition, id, _v3(p.x, p.z), NM_M, MARK_COLORS.carrier,
+        _alpha(MARK_COLORS.carrier, 0.15), 1, true, "") end)
+    local parts = { c.unitName .. " (" .. c.type .. ")", _radioText(c.radio) }
+    if c.tacan then parts[#parts + 1] = "TACAN " .. _tacanText(c.tacan) end
+    if c.icls then parts[#parts + 1] = "ICLS " .. c.icls.channel end
+    parts[#parts + 1] = string.format("BRC %03d", _round(TR_Carrier.heading or c.heading) % 360)
+    _markText("carrier", p.x + NM_M + 800, p.z, table.concat(parts, " | "), MARK_COLORS.carrier)
+    TR_Markers.carrierAt = { x = p.x, z = p.z, h = TR_Carrier.heading or c.heading }
+end
+
 -- ===========================================================================
 -- MODULE: BOMBING RANGE
 -- ===========================================================================
@@ -706,6 +860,12 @@ local function _bombingSpawn(kind, count)
     local fit = 0.7 * math.sqrt(_shapeArea(zone) / count)
     if fit < spacing then spacing = math.max(100, fit) end
     local pts = _generateSpacedPoints(zone, count, spacing, 100)
+    -- Random placement near the packing limit misses the last point now and
+    -- then: try again a little tighter rather than place fewer.
+    while #pts < count and spacing > 100 do
+        spacing = math.max(100, spacing * 0.85)
+        pts = _generateSpacedPoints(zone, count, spacing, 100)
+    end
     if #pts < count then
         _out("[Bombing Range] Only placed " .. #pts .. " of " .. count .. " (spacing/zone limit).", 12)
     elseif spacing < TR_Config.bombing.minSpacing then
@@ -872,11 +1032,28 @@ local function _seadGunsROE()
     return TR_SEAD.aaaLive and AI.Option.Ground.val.ROE.OPEN_FIRE or AI.Option.Ground.val.ROE.WEAPON_HOLD
 end
 
+-- A range group is added and removed through these two, so the missile
+-- protection, the HARM reaction and any timer still pending for an older
+-- spawn of the same name all agree on what is on the range.
+local function _seadAdd(gname, label)
+    TR_SEAD.rangeGroups[gname] = true
+    TR_SEAD.emitters[gname] = label -- nil for groups with no radar
+    TR_SEAD.spawnSeq[gname] = (TR_SEAD.spawnSeq[gname] or 0) + 1
+    TR_SEAD.harm[gname] = nil
+end
+
+local function _seadDrop(gname)
+    TR_SEAD.rangeGroups[gname], TR_SEAD.emitters[gname], TR_SEAD.harm[gname] = nil, nil, nil
+    TR_SEAD.spawnSeq[gname] = (TR_SEAD.spawnSeq[gname] or 0) + 1
+    _destroyGroupByName(gname)
+end
+
+local function _harmNote()
+    return TR_SEAD.harmOn and " Radars shut down when an anti-radiation missile comes at them." or ""
+end
+
 local function _seadRemoveIRGroups()
-    for _, g in ipairs(TR_SEAD.irGroups) do
-        TR_SEAD.rangeGroups[g] = nil
-        _destroyGroupByName(g)
-    end
+    for _, g in ipairs(TR_SEAD.irGroups) do _seadDrop(g) end
     TR_SEAD.irGroups, TR_SEAD.irActive = {}, nil
 end
 
@@ -884,16 +1061,16 @@ local function _seadSpawnRadar(key)
     local preset = SEAD_RADAR_PRESETS[key]; if not preset then return end
     local zone = _zone(TR_Config.sead.radarZone); if not zone then return end
     if TR_SEAD.radarActive then -- one radar preset at a time
-        TR_SEAD.rangeGroups[TR_SEAD.radarActive] = nil
-        _destroyGroupByName(TR_SEAD.radarActive)
+        _seadDrop(TR_SEAD.radarActive)
         TR_SEAD.radarActive = nil
     end
     local center = _randomLandPointInShape(zone, 500) -- keep the cluster off the edge
     if not _spawnGround(preset.group, preset.units, center, ENEMY_COUNTRY) then return end
     _setGroundCombatReady(preset.group)
     TR_SEAD.radarActive = preset.group
-    TR_SEAD.rangeGroups[preset.group] = true
-    _out("[SEAD] Radar SAM active: " .. key .. " (" .. preset.group .. ").", 10)
+    _seadAdd(preset.group, (not preset.optical) and preset.label or nil)
+    _out("[SEAD] Radar SAM active: " .. preset.label .. " (" .. preset.group .. ")." ..
+         ((not preset.optical) and _harmNote() or ""), 10)
 end
 
 local function _seadSpawnIR(key)
@@ -905,7 +1082,7 @@ local function _seadSpawnIR(key)
     if preset.units and _spawnGround(preset.group, preset.units, center, ENEMY_COUNTRY) then
         _setGroundCombatReady(preset.group)
         TR_SEAD.irGroups[#TR_SEAD.irGroups + 1] = preset.group
-        TR_SEAD.rangeGroups[preset.group] = true
+        _seadAdd(preset.group, nil)
         spawned = true
     end
     if preset.guns then
@@ -914,20 +1091,23 @@ local function _seadSpawnIR(key)
         if _spawnGround(gname, preset.guns, gc, ENEMY_COUNTRY) then
             _setGroundOptions(gname, _seadGunsROE(), AI.Option.Ground.val.ALARM_STATE.RED)
             TR_SEAD.irGroups[#TR_SEAD.irGroups + 1] = gname
-            TR_SEAD.rangeGroups[gname] = true
+            _seadAdd(gname, preset.label .. " guns")
             spawned = true
         end
     end
     if not spawned then return end
     TR_SEAD.irActive = key
-    _out("[SEAD] IR/AAA active: " .. key .. (preset.guns and (TR_SEAD.aaaLive and " (AAA live fire)." or
+    _out("[SEAD] IR/AAA active: " .. preset.label .. (preset.guns and (TR_SEAD.aaaLive and " (AAA live fire)." or
          " (AAA radar on, holding fire).") or "."), 10)
 end
 
 local function _seadToggleAAA()
     TR_SEAD.aaaLive = not TR_SEAD.aaaLive
     for _, g in ipairs(TR_SEAD.irGroups) do
-        if g:sub(-5) == "_GUNS" then _setGroundOptions(g, _seadGunsROE(), AI.Option.Ground.val.ALARM_STATE.RED) end
+        local h = TR_SEAD.harm[g]
+        if g:sub(-5) == "_GUNS" and not (h and h.off) then -- a site hiding from a HARM stays dark
+            _setGroundOptions(g, _seadGunsROE(), AI.Option.Ground.val.ALARM_STATE.RED)
+        end
     end
     _out("[SEAD] AAA " .. (TR_SEAD.aaaLive and "LIVE FIRE: guns can hit you, they cannot be intercepted." or
          "holding fire (radar still on)."), 12)
@@ -935,8 +1115,7 @@ end
 
 local function _seadRemoveRadar()
     if TR_SEAD.radarActive then
-        TR_SEAD.rangeGroups[TR_SEAD.radarActive] = nil
-        _destroyGroupByName(TR_SEAD.radarActive)
+        _seadDrop(TR_SEAD.radarActive)
         TR_SEAD.radarActive = nil
         _out("[SEAD] Radar SAM removed.")
     else
@@ -955,8 +1134,7 @@ end
 
 local function _seadReset()
     if TR_SEAD.radarActive then
-        TR_SEAD.rangeGroups[TR_SEAD.radarActive] = nil
-        _destroyGroupByName(TR_SEAD.radarActive)
+        _seadDrop(TR_SEAD.radarActive)
         TR_SEAD.radarActive = nil
     end
     _seadRemoveIRGroups()
@@ -1049,11 +1227,8 @@ local function _trackMissile(m)
     end, nil, timer.getTime() + 0.05)
 end
 
-local function _onShot(event)
-    if not (TR_Config.protection.enabled and Weapon and Weapon.Category) then return end
-    local w, s = event.weapon, event.initiator
-    if not (w and s and s.getName and w.getDesc) then return end
-    local desc = w:getDesc() or {}
+local function _protectShot(event, w, s, desc)
+    if not TR_Config.protection.enabled then return end
     if desc.category ~= Weapon.Category.MISSILE then return end
     local mc = desc.missileCategory
     if mc and Weapon.MissileCategory and mc ~= Weapon.MissileCategory.AAM and mc ~= Weapon.MissileCategory.SAM then return end
@@ -1071,6 +1246,373 @@ local function _onShot(event)
         name = desc.displayName or (w.getTypeName and w:getTypeName()) or "missile",
         big = mass > TR_Config.protection.bigKg,
     })
+end
+
+-- ===========================================================================
+-- HARM REACTION
+-- ---------------------------------------------------------------------------
+-- An anti-radiation missile (passive radar guidance) fired at a range SAM
+-- makes the site switch its radar off after the crew's reaction time, and
+-- back on a while after the missile has gone, as a real site does to survive:
+-- the shooter sees it drop off the RWR, and the missile has to manage without
+-- the emitter. The site is the missile's target when the launch had one,
+-- otherwise the emitter the missile is flying at. The radar goes dark with
+-- the emission switch (DCS 2.7+) and the green alarm state, which also works
+-- on older versions.
+-- ===========================================================================
+local ARM_NAMES = { "AGM_88", "AGM_122", "AGM_45", "ALARM", "LD%-10", "X_58", "X_28", "X_25MP", "X_31P" }
+
+-- Passive radar guidance says it; the type name says it for the known ARMs
+-- when a build gives no guidance field.
+local function _isARM(w, desc)
+    if desc.category ~= Weapon.Category.MISSILE then return false end
+    local rp = Weapon.GuidanceType and Weapon.GuidanceType.RADAR_PASSIVE
+    if rp and desc.guidance == rp then return true end
+    local tn = (w.getTypeName and w:getTypeName()) or ""
+    for _, pat in ipairs(ARM_NAMES) do
+        if tn:find(pat) then return true end
+    end
+    return false
+end
+
+local function _harmSite(w)
+    local tgt
+    pcall(function() tgt = w:getTarget() end)
+    if tgt and tgt.getGroup then
+        local ok, gname = pcall(function() return tgt:getGroup():getName() end)
+        if ok and gname then return TR_SEAD.emitters[gname] and gname or nil end
+    end
+    local okp, pos = pcall(function() return w:getPosition() end)
+    if not okp or not pos then return nil end
+    local C = TR_Config.sead
+    local hdg = math.deg(math.atan2(pos.x.z, pos.x.x))
+    local best, ba
+    for gname in pairs(TR_SEAD.emitters) do
+        local g = Group.getByName(gname)
+        local u = g and g:getUnits()[1]
+        if u then
+            local sp = u:getPoint()
+            local d = _dist2D(sp, pos.p)
+            local a = math.abs((math.deg(math.atan2(sp.z - pos.p.z, sp.x - pos.p.x)) - hdg + 540) % 360 - 180)
+            if d <= C.harmReachKm * 1000 and a <= C.harmConeDeg and (not ba or a < ba) then best, ba = gname, a end
+        end
+    end
+    return best
+end
+
+-- Radar on or off. Back on, the site takes the rules it was spawned with.
+local function _seadEmit(gname, on)
+    local g = Group.getByName(gname); if not g then return end
+    if g.enableEmission then pcall(function() g:enableEmission(on) end) end
+    local ctrl = g:getController()
+    local A = AI.Option.Ground
+    pcall(function() ctrl:setOption(A.id.ALARM_STATE, on and A.val.ALARM_STATE.RED or A.val.ALARM_STATE.GREEN) end)
+    if on then
+        local roe = (gname:sub(-5) == "_GUNS") and _seadGunsROE() or A.val.ROE.OPEN_FIRE
+        pcall(function() ctrl:setOption(A.id.ROE, roe) end)
+    end
+end
+
+-- Players who care: the shooters and everyone in the SEAD range.
+local function _harmTell(shooters, msg)
+    local told = {}
+    for _, list in ipairs({ TR_SEAD.players, shooters }) do
+        for name in pairs(list) do
+            local u = not told[name] and Unit.getByName(name)
+            if u then _msgToUnit(u, msg, 10); told[name] = true end
+        end
+    end
+end
+
+local function _harmShot(event, w, s, desc)
+    if not TR_SEAD.harmOn or not _isARM(w, desc) then return end
+    local gname = _harmSite(w); if not gname then return end
+    local C = TR_Config.sead
+    local seq = TR_SEAD.spawnSeq[gname]
+    local st = TR_SEAD.harm[gname]
+    if not st or st.seq ~= seq then
+        st = { seq = seq, inbound = 0, off = false, pendingOff = false, shooters = {} }
+        TR_SEAD.harm[gname] = st
+    end
+    st.inbound = st.inbound + 1
+    st.back = nil -- a new missile cancels a pending switch-on
+    local label = TR_SEAD.emitters[gname]
+    if s and s.getName then st.shooters[s:getName()] = true end
+    local function current() return TR_SEAD.spawnSeq[gname] == seq and TR_SEAD.harm[gname] == st end
+
+    if not st.off and not st.pendingOff then
+        st.pendingOff = true
+        timer.scheduleFunction(function()
+            if not current() then return nil end
+            st.pendingOff = false
+            if st.inbound <= 0 then return nil end -- the missile is already down
+            st.off = true
+            _seadEmit(gname, false)
+            _harmTell(st.shooters, "[SEAD] " .. label .. " radar OFF: anti-radiation missile inbound.")
+            return nil
+        end, nil, timer.getTime() + math.random(C.harmDelay[1], C.harmDelay[2]))
+    end
+
+    -- Follow the missile; when the last one is gone, back on after a while.
+    timer.scheduleFunction(function(_, t)
+        local alive = false
+        pcall(function() alive = w:isExist() end)
+        if alive then return t + 1 end
+        if not current() then return nil end
+        st.inbound = st.inbound - 1
+        if st.inbound > 0 then return nil end
+        local token = {}
+        st.back = token
+        timer.scheduleFunction(function()
+            if not current() or st.back ~= token then return nil end
+            if st.off then
+                st.off = false
+                _seadEmit(gname, true)
+                _harmTell(st.shooters, "[SEAD] " .. label .. " radar back ON.")
+            end
+            return nil
+        end, nil, timer.getTime() + math.random(C.harmOff[1], C.harmOff[2]))
+        return nil
+    end, nil, timer.getTime() + 1)
+end
+
+local function _seadToggleHarm()
+    TR_SEAD.harmOn = not TR_SEAD.harmOn
+    if not TR_SEAD.harmOn then -- sites still hiding come back up now
+        for gname, st in pairs(TR_SEAD.harm) do
+            if st.off then _seadEmit(gname, true) end
+        end
+        TR_SEAD.harm = {}
+    end
+    _out("[SEAD] HARM reaction " .. (TR_SEAD.harmOn and
+         "ON: radar SAMs switch off when an anti-radiation missile comes at them." or
+         "OFF: radar SAMs keep emitting whatever comes at them."), 12)
+end
+
+-- ===========================================================================
+-- BOMBING SCORES
+-- ---------------------------------------------------------------------------
+-- Every bomb, rocket and air-to-ground missile a player releases near the
+-- range is followed to the ground, polled more often as it gets close. The
+-- impact point is where its last position and direction meet the terrain
+-- (land.getIP); a weapon that vanishes in the air (a cluster dispenser
+-- opening) is carried on in free fall to the ground. The score is the distance
+-- from the nearest range target, with the clock position seen along the
+-- attack heading (12 o'clock = long, 6 o'clock = short). Target positions
+-- are kept from the last seconds of the fall, so a target the weapon has
+-- just destroyed still counts. A salvo (ripple, rocket pod) is one message.
+-- ===========================================================================
+local _scorePending = {} -- [shooter unit name] = { who, list, token }
+
+local function _scoreTargets()
+    local out = {}
+    for uname in pairs(TR_Bombing.unitGroup) do
+        local u = Unit.getByName(uname)
+        if u and u:isExist() then
+            local p = u:getPoint()
+            out[#out + 1] = { x = p.x, z = p.z, type = u:getTypeName() }
+        end
+    end
+    return out
+end
+
+local function _bombZones()
+    local b, out = TR_Config.bombing, {}
+    for _, zn in ipairs({ b.zone, b.lightZone, b.heavyZone }) do
+        local s = _zoneShape(zn)
+        if s then out[#out + 1] = s end
+    end
+    return out
+end
+
+local function _grade(d)
+    local g = TR_Config.scoring.goodM
+    if d <= 1.53 then return "SHACK" end
+    if d <= g / 2 then return "EXCELLENT" end
+    if d <= g then return "GOOD" end
+    if d <= 2 * g then return "INEFFECTIVE" end
+    return "POOR"
+end
+
+local function _clock(relDeg)
+    local c = math.floor((relDeg % 360) / 30 + 0.5) % 12
+    return ((c == 0) and 12 or c) .. " o'clock"
+end
+
+local function _scoreText(r)
+    if r.miss then return "no target within " .. TR_Config.scoring.radius .. " m" end
+    return string.format("%d m at %s from %s, %s", _round(r.d), r.clock, r.target, r.q)
+end
+
+local function _scoreFlush(key)
+    local p = _scorePending[key]
+    _scorePending[key] = nil
+    if not p or #p.list == 0 then return end
+    local list, name = p.list, p.list[1].name
+    for _, r in ipairs(list) do
+        if r.name ~= name then name = "weapons" break end
+    end
+    local text
+    if #list == 1 then
+        text = name .. (list[1].burst and " (opened in the air)" or "") .. ": " .. _scoreText(list[1])
+    else
+        local best, sum, n = nil, 0, 0
+        for _, r in ipairs(list) do
+            if not r.miss then
+                n, sum = n + 1, sum + r.d
+                if not best or r.d < best.d then best = r end
+            end
+        end
+        if best then
+            text = string.format("%d x %s: best %s, average %d m (%d of %d scored)", #list, name, _scoreText(best),
+                                 _round(sum / n), n, #list)
+        else
+            text = string.format("%d x %s: %s", #list, name, _scoreText(list[1]))
+        end
+    end
+    local s = TR_Bombing.scores[p.who]
+    local tail = s and string.format(" | %s: %d scored, average %d m.", p.who, s.n, _round(s.sum / s.n)) or "."
+    local u = Unit.getByName(key)
+    if u then _msgToUnit(u, "[Bombing Range] " .. text .. tail, 15) end
+end
+
+local function _scoreImpact(m, ip)
+    local S = TR_Config.scoring
+    local best, bd
+    for _, t in ipairs(m.snap or {}) do
+        local d = math.sqrt((t.x - ip.x) ^ 2 + (t.z - ip.z) ^ 2)
+        if not bd or d < bd then best, bd = t, d end
+    end
+    local r = { name = m.name, burst = m.burst }
+    if best and bd <= S.radius then
+        r.d, r.target, r.q = bd, best.type, _grade(bd)
+        r.clock = _clock(math.deg(math.atan2(ip.z - best.z, ip.x - best.x)) - m.attackHdg)
+        local rec = TR_Bombing.scores[m.who] or { n = 0, sum = 0, shacks = 0 }
+        rec.n, rec.sum = rec.n + 1, rec.sum + bd
+        if not rec.best or bd < rec.best then rec.best, rec.bestQ = bd, r.q end
+        if r.q == "SHACK" then rec.shacks = rec.shacks + 1 end
+        TR_Bombing.scores[m.who] = rec
+    else
+        local onRange = false
+        for _, z in ipairs(_bombZones()) do
+            if _inShape(ip, z) then onRange = true break end
+        end
+        if not onRange then return end -- not on the range: nothing to say
+        r.miss = true
+    end
+    local p = _scorePending[m.shooter] or { who = m.who, list = {} }
+    _scorePending[m.shooter] = p
+    p.list[#p.list + 1] = r
+    local token = {}
+    p.token = token
+    timer.scheduleFunction(function()
+        if _scorePending[m.shooter] == p and p.token == token then _scoreFlush(m.shooter) end
+        return nil
+    end, nil, timer.getTime() + 1.5)
+end
+
+local function _scoreTrack(m)
+    timer.scheduleFunction(function(_, t)
+        local ok, nxt = pcall(function()
+            local w = m.weapon
+            if w:isExist() then
+                local pos, v = w:getPosition(), w:getVelocity()
+                local p = pos.p
+                local agl = p.y - _groundY(p.x, p.z)
+                local speed = math.sqrt(v.x * v.x + v.y * v.y + v.z * v.z)
+                local tti = (v.y < -1) and (agl / -v.y) or 60
+                if tti < 3 then m.snap = _scoreTargets() end
+                m.pos, m.vel, m.agl, m.speed = pos, v, agl, speed
+                if t - m.t0 > 300 then return nil end
+                -- poll faster as the ground gets close, and never let the weapon
+                -- move more than 150 m between two looks
+                m.dt = math.max(0.02, math.min(1, tti / 4, 150 / math.max(speed, 1)))
+                return t + m.dt
+            end
+            if not m.pos then return nil end
+            local p, v = m.pos.p, m.vel
+            local ip
+            pcall(function() ip = land.getIP(p, m.pos.x, math.max(50, m.speed * m.dt * 2)) end)
+            if not ip then
+                -- Gone in the air (a dispenser opening, a fuze): on in free fall
+                -- from the last position and velocity down to the ground.
+                local d = -v.y
+                local tt = (m.agl > 0) and (-d + math.sqrt(d * d + 2 * 9.81 * m.agl)) / 9.81 or 0
+                ip = { x = p.x + v.x * tt, y = 0, z = p.z + v.z * tt }
+                m.burst = m.agl > 30
+            end
+            _scoreImpact(m, ip)
+            return nil
+        end)
+        if not ok then
+            env.info("[Training Range] weapon scoring error: " .. tostring(nxt))
+            return nil
+        end
+        return nxt
+    end, nil, timer.getTime() + 0.1)
+end
+
+local function _scoreShot(event, w, s, desc)
+    local S = TR_Config.scoring
+    if not S.enabled then return end
+    local okp, who = pcall(function() return s:getPlayerName() end)
+    if not okp or not who or who == "" then return end -- players only
+    local c = desc.category
+    local wanted = (c == Weapon.Category.BOMB) or (S.rockets and c == Weapon.Category.ROCKET)
+    if not wanted and S.missiles and c == Weapon.Category.MISSILE then
+        wanted = Weapon.MissileCategory and desc.missileCategory == Weapon.MissileCategory.OTHER and not _isARM(w, desc)
+    end
+    if not wanted then return end
+    local sp = s:getPoint()
+    local near = false
+    for _, z in ipairs(_bombZones()) do
+        if _dist2D(sp, { x = z.cx, z = z.cz }) <= S.trackKm * 1000 + z.r then near = true break end
+    end
+    if not near then return end
+    local v = s:getVelocity()
+    local hdg
+    if math.sqrt(v.x * v.x + v.z * v.z) > 5 then
+        hdg = math.deg(math.atan2(v.z, v.x))
+    else
+        local o = s:getPosition().x
+        hdg = math.deg(math.atan2(o.z, o.x))
+    end
+    _scoreTrack({
+        weapon = w, shooter = s:getName(), who = who, attackHdg = hdg, t0 = timer.getTime(),
+        name = desc.displayName or (w.getTypeName and w:getTypeName()) or "weapon",
+        snap = _scoreTargets(),
+    })
+end
+
+local function _scoreBoard()
+    local rows = {}
+    for who, s in pairs(TR_Bombing.scores) do rows[#rows + 1] = { who = who, s = s, avg = s.sum / s.n } end
+    if #rows == 0 then _out("[Bombing Range] No scored impacts yet.", 10); return end
+    table.sort(rows, function(a, b) return a.avg < b.avg end)
+    local lines = { "[Bombing Range] Scores, average distance from the target:" }
+    for i, r in ipairs(rows) do
+        lines[#lines + 1] = string.format("%d. %s: %d weapon(s), average %d m, best %d m (%s)%s", i, r.who, r.s.n,
+            _round(r.avg), _round(r.s.best), r.s.bestQ, (r.s.shacks > 0) and (", " .. r.s.shacks .. " shack(s)") or "")
+    end
+    _out(table.concat(lines, "\n"), 25)
+end
+
+local function _scoreClear()
+    TR_Bombing.scores = {}
+    _out("[Bombing Range] Scores cleared.", 8)
+end
+
+-- One S_EVENT_SHOT, three independent users: an error in one does not stop
+-- the others.
+local function _onShot(event)
+    if not (Weapon and Weapon.Category) then return end
+    local w, s = event.weapon, event.initiator
+    if not (w and s and s.getName and w.getDesc) then return end
+    local desc = w:getDesc() or {}
+    for _, f in ipairs({ _protectShot, _harmShot, _scoreShot }) do
+        local ok, err = pcall(f, event, w, s, desc)
+        if not ok then env.info("[Training Range] shot handler error: " .. tostring(err)) end
+    end
 end
 
 -- ===========================================================================
@@ -1226,6 +1768,7 @@ local function _carrierSpawn()
     if not grp then return end
     timer.scheduleFunction(function() _carrierApplyROE(); _carrierComms(); return nil end, nil, timer.getTime() + 1.5)
     _carrierRegister()
+    _markCarrier()
     _out(string.format("[Carrier] Strike group on station, steaming %03d at %d kt (carrier plus %d escorts).\n%s",
          _round(TR_Carrier.heading) % 360, _round(TR_Carrier.speed), #units - 1, _carrierCommsLine()), 15)
 end
@@ -1295,6 +1838,7 @@ local function _carrierRecovery()
     end
     TR_Carrier.heading, TR_Carrier.speed = brc, speed
     _carrierRegister()
+    _markCarrier()
     _out(string.format("[Carrier] Recovery: BRC %03d at %d kt | wind %s | WOD ~%d kt | %.0f NM of sea room.",
          _round(brc) % 360, speed, calm and "calm" or string.format("%d kt from %03d", _round(kt), _round(from) % 360),
          _round(speed + (calm and 0 or kt)), leg / NM_M), 15)
@@ -1355,6 +1899,19 @@ local function _s3Track()
            { x = cp.x, z = cp.z, h = hdg }
 end
 
+local function _s3Mark(wp1, wp2)
+    local rt = TR_Config.carrier.recoveryTanker
+    local label = string.format("S-3B recovery tanker | %s | TACAN %s | %d ft, %d KIAS", _radioText(rt.radio),
+                                _tacanText(rt.tacan), _round(rt.alt * 3.28084 / 100) * 100, rt.kias)
+    TR_Carrier.s3Track = { wp1 = wp1, wp2 = wp2, label = label }
+    _markTrack("s3", wp1, wp2, MARK_COLORS.tanker, label)
+end
+
+local function _s3Unmark()
+    TR_Carrier.s3Track = nil
+    _markClear("s3")
+end
+
 local function _carrierTanker()
     if TR_Carrier.recoveryTanker and Group.getByName(TR_Carrier.recoveryTanker) then
         _out("[Carrier] Recovery tanker already airborne."); return
@@ -1374,6 +1931,7 @@ local function _carrierTanker()
         radio = rt.radio, tacan = rt.tacan,
         note = string.format("%d ft, %d KIAS, over the carrier", _round(rt.alt * 3.28084 / 100) * 100, rt.kias),
     })
+    _s3Mark(wp1, wp2)
     _out(string.format("[Carrier] S-3B recovery tanker airborne | %s | TACAN %s | %d KIAS.",
          _radioText(rt.radio), _tacanText(rt.tacan), rt.kias), 15)
 end
@@ -1389,7 +1947,10 @@ local function _s3Tick()
     local moved = a and _dist2D(a, anchor) or math.huge
     local turned = a and math.abs((anchor.h - a.h + 540) % 360 - 180) or 180
     if moved > rt.refreshKm * 1000 or turned > 20 then
-        if _retaskTanker(name, wp1, wp2, rt.alt, _tasFromKias(rt.kias, rt.alt)) then TR_Carrier.s3Anchor = anchor end
+        if _retaskTanker(name, wp1, wp2, rt.alt, _tasFromKias(rt.kias, rt.alt)) then
+            TR_Carrier.s3Anchor = anchor
+            _s3Mark(wp1, wp2)
+        end
     end
 end
 
@@ -1397,6 +1958,7 @@ local function _carrierRemoveTanker()
     if TR_Carrier.recoveryTanker then
         _destroyGroupByName(TR_Carrier.recoveryTanker)
         TR_Carrier.recoveryTanker, TR_Carrier.s3Anchor = nil, nil
+        _s3Unmark()
         _out("[Carrier] S-3B recovery tanker removed.")
     else
         _out("[Carrier] No recovery tanker airborne.")
@@ -1426,8 +1988,9 @@ local function _carrierRespawn()
     _destroyGroupByName(TR_Config.carrier.groupName)
     _destroyGroupByName(TR_Carrier.recoveryTanker)
     TR_Carrier.spawned, TR_Carrier.recoveryTanker, TR_Carrier.s3Anchor = false, nil, nil
+    _s3Unmark()
     TR_Carrier.heading = TR_Config.carrier.heading
-    _carrierSpawn() -- back on station at the zone
+    _carrierSpawn() -- back on station at the zone (and on the map)
 end
 
 -- ===========================================================================
@@ -1464,6 +2027,11 @@ local function _refuelRegister(which, kias, axis, wp1, wp2)
         note = string.format("FL%03d, %d KIAS, track %03d/%03d, %d NM legs", _round(c.alt * 3.28084 / 100), kias,
                              _round(axis) % 360, (_round(axis) + 180) % 360, _round(_dist2D(wp1, wp2) / NM_M)),
     })
+    -- and on the F10 map: the track with the comms beside it
+    local label = string.format("%s tanker (%s) | %s | TACAN %s | FL%03d, %d KIAS", _refuelLabel(which), c.type,
+                                _radioText(c.radio), _tacanText(c.tacan), _round(c.alt * 3.28084 / 100), kias)
+    TR_Refueling.tracks[which] = { wp1 = wp1, wp2 = wp2, label = label }
+    _markTrack("tanker." .. which, wp1, wp2, MARK_COLORS.tanker, label)
 end
 
 local function _refuelSpawn(which)
@@ -1502,11 +2070,17 @@ local function _refuelSetSpeed(which, kias)
     _out(string.format("[Refueling] %s tanker speed set to %d KIAS.", _refuelLabel(which), kias), 10)
 end
 
+local function _refuelUnmark(which)
+    TR_Refueling.tracks[which] = nil
+    _markClear("tanker." .. which)
+end
+
 local function _refuelRemove(which)
     local label = _refuelLabel(which)
     if TR_Refueling[which] then
         _destroyGroupByName(TR_Refueling[which])
         TR_Refueling[which] = nil
+        _refuelUnmark(which)
         _out("[Refueling] " .. label .. " tanker removed.")
     else
         _out("[Refueling] No " .. label .. " tanker in service.")
@@ -1516,7 +2090,76 @@ end
 local function _refuelReset()
     _destroyGroupByName(TR_Refueling.basket); TR_Refueling.basket = nil
     _destroyGroupByName(TR_Refueling.boom);   TR_Refueling.boom = nil
+    _refuelUnmark("basket"); _refuelUnmark("boom")
     _out("[Refueling] Reset done.")
+end
+
+-- ===========================================================================
+-- F10 MAP: zones, refresh, toggle
+-- ===========================================================================
+local function _markZones()
+    _markClear("zones")
+    if not (_markOn() and TR_Config.markers.zones) then return end
+    local b, s, C = TR_Config.bombing, TR_Config.sead, MARK_COLORS
+    _markZone("zones", b.zone,      "Bombing range: trucks and convoy", C.bombing)
+    _markZone("zones", b.lightZone, "Bombing range: light armour",      C.bombing)
+    _markZone("zones", b.heavyZone, "Bombing range: heavy armour",      C.bombing)
+    _markZone("zones", TR_Config.dogfight.zone, "Dogfight arena (players)", C.dogfight)
+    _markZone("zones", s.radarZone, "SEAD range: radar SAM", C.sead)
+    _markZone("zones", s.irZone,    "SEAD range: IR / AAA",  C.sead)
+end
+
+local function _markAll()
+    _markZones()
+    for which, name in pairs(_refuelNames) do
+        local t = TR_Refueling.tracks[which]
+        if t and Group.getByName(name) then _markTrack("tanker." .. which, t.wp1, t.wp2, MARK_COLORS.tanker, t.label)
+        else _markClear("tanker." .. which) end
+    end
+    local s3 = TR_Carrier.s3Track
+    if s3 and TR_Carrier.recoveryTanker and Group.getByName(TR_Carrier.recoveryTanker) then
+        _markTrack("s3", s3.wp1, s3.wp2, MARK_COLORS.tanker, s3.label)
+    else
+        _markClear("s3")
+    end
+    _markCarrier()
+end
+
+-- Every 30 s: the carrier ring follows the ship, and the tracks of tankers
+-- that are gone on their own (shot down, out of fuel) are taken off.
+local function _markTick()
+    if not _markOn() then return end
+    local c = TR_Config.carrier
+    local u = Unit.getByName(c.unitName)
+    local a = TR_Markers.carrierAt
+    if u then
+        local h = TR_Carrier.heading or c.heading
+        if not a or _dist2D(a, u:getPoint()) > NM_M or math.abs((h - a.h + 540) % 360 - 180) > 1 then _markCarrier() end
+    elseif a then
+        _markClear("carrier")
+        TR_Markers.carrierAt = nil
+    end
+    for which, name in pairs(_refuelNames) do
+        if TR_Markers.ids["tanker." .. which] and not Group.getByName(name) then _refuelUnmark(which) end
+    end
+    if TR_Markers.ids.s3 and not (TR_Carrier.recoveryTanker and Group.getByName(TR_Carrier.recoveryTanker)) then
+        _s3Unmark()
+    end
+end
+
+local function _markToggle()
+    if not trigger.action.markupToAll then
+        _out("[Training Range] Map drawings need DCS 2.7 or later.", 10)
+        return
+    end
+    TR_Markers.on = not TR_Markers.on
+    if TR_Markers.on then
+        _markAll()
+    else
+        for key in pairs(TR_Markers.ids) do _markClear(key) end
+        TR_Markers.carrierAt = nil
+    end
+    _out("[Training Range] F10 map drawings " .. (TR_Markers.on and "ON." or "OFF."), 8)
 end
 
 -- ===========================================================================
@@ -1603,6 +2246,8 @@ local function _buildMenu()
         end
     end
     _cmd("Spawn convoy",        mB, function() _bombingSpawnConvoy() end)
+    _cmd("Scores",              mB, function() _scoreBoard() end)
+    _cmd("Clear scores",        mB, function() _scoreClear() end)
     _cmd("Reset Bombing Range", mB, function() _bombingReset() end)
 
     -- SEAD Range
@@ -1615,6 +2260,7 @@ local function _buildMenu()
     _cmd("Spawn SA-11",         mSr, function() _seadSpawnRadar("SA11") end)
     _cmd("Spawn Hawk",          mSr, function() _seadSpawnRadar("HAWK") end)
     _cmd("Spawn Rapier (optical)", mSr, function() _seadSpawnRadar("RAPIER") end)
+    _cmd("HARM reaction on/off", mSr, function() _seadToggleHarm() end)
     _cmd("Remove radar SAM",    mSr, function() _seadRemoveRadar() end)
     local mSi = _menu("IR/AAA Zone", mS)
     _cmd("Spawn IR (light)",         mSi, function() _seadSpawnIR("IR_LIGHT") end)
@@ -1653,7 +2299,8 @@ local function _buildMenu()
     _cmd("Remove Boom tanker",   mR, function() _refuelRemove("boom") end)
     _cmd("Reset Refueling",      mR, function() _refuelReset() end)
 
-    -- Global reset
+    -- Map drawings and global reset
+    _cmd("Map drawings on/off",      root, function() _markToggle() end)
     _cmd("Reset all (every module)", root, function() _resetAll() end)
 end
 
@@ -1675,6 +2322,8 @@ end
 if not TR_Initialized then
     TR_Initialized = true
     TR_SEAD.aaaLive = TR_Config.sead.aaaLiveFire
+    TR_SEAD.harmOn  = TR_Config.sead.harmReaction
+    TR_Markers.on   = TR_Config.markers.enabled
 
     _checkZones()
     _buildMenu()
@@ -1690,10 +2339,13 @@ if not TR_Initialized then
         nil, timer.getTime() + sdi)
     timer.scheduleFunction(function(_, time) pcall(_s3Tick); return time + 60 end,
         nil, timer.getTime() + 60)
+    timer.scheduleFunction(function(_, time) pcall(_markTick); return time + 30 end,
+        nil, timer.getTime() + 30)
 
     -- The carrier strike group is on station from mission start. Small delay so
-    -- the mission is fully loaded before the ship group spawns.
-    timer.scheduleFunction(function() pcall(_carrierSpawn); return nil end, nil, timer.getTime() + 1.0)
+    -- the mission is fully loaded before the ship group spawns; the range zones
+    -- go on the map with it.
+    timer.scheduleFunction(function() pcall(_carrierSpawn); pcall(_markZones); return nil end, nil, timer.getTime() + 1.0)
 
     _out("[Training Range] Ready. Open the F10 radio menu -> Training Range.", 15)
 end

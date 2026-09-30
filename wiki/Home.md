@@ -7,8 +7,8 @@ of them or only the one you need.
 
 | Script | What you get |
 |---|---|
-| `TrainingRange.lua` | An F10 range: bombing targets, a dogfight arena, SEAD threats, carrier ops and air-to-air tankers |
-| `TRAINING_Intercept.lua` | A scramble-intercept trainer with its own radio menu |
+| `TrainingRange.lua` | An F10 range: bombing targets with impact scores, a dogfight arena, SEAD threats that hide from HARMs, carrier ops and air-to-air tankers, all drawn on the F10 map |
+| `TRAINING_Intercept.lua` | A scramble-intercept trainer with its own radio menu and a Bogey dope (BRAA) call |
 | `TRAINING_GCA.lua` | A text Ground Controlled Approach that talks you down to a runway |
 | `TRAINING_AirCombat.lua` | Air-to-air arenas against RED: dogfight, BVR, and a mixed group that scales to the number of players |
 | `JTAC.lua` | A spotter you call from the menu (MQ-9 UAV or ground JTAC), invisible to the enemy, that lases RED targets with a code you can change |
@@ -36,7 +36,8 @@ its DO SCRIPT FILE trigger and save, or the mission keeps running the old copy.
 2. Set **Type = Circle**, or **Quad** if you want a shape: a Quad is used exactly as you draw it.
 3. Name it exactly as written in the tables below.
 4. Set the size (my suggestions are just a starting point, size them to fit your map). Careful with units:
-   if the editor is set to feet, typing 15000 gives you 15000 ft (4.6 km), not 15 km.
+   if the editor is set to feet, typing 15000 gives you 15000 ft (4.6 km), not 15 km. A Quad can be
+   rotated and stretched as you like, just keep it convex (no corner pushed inward).
 5. Place it where you want that activity to happen.
 
 If a zone is missing, the script tells you on screen instead of spawning, so a wrong name is easy to spot.
@@ -81,6 +82,19 @@ A few notes:
   intercepted, so the range AAA keeps its radar on but holds fire unless you switch **AAA live fire** on.
 * The bombing targets (Ural, BTR-80, T-90) and the convoy are all weapon-hold, so they never shoot back.
   The convoy keeps driving its loop for the whole mission.
+* **Bombing scores:** drop a bomb, fire rockets or an air-to-ground missile near the range and the script
+  follows it to the ground. You get something like *"Mk-82: 18 m at 5 o'clock from T-90, GOOD"*: the
+  distance from the nearest target, the clock position seen along your attack heading (12 o'clock is
+  long, 6 o'clock is short) and a grade (SHACK, EXCELLENT, GOOD, INEFFECTIVE, POOR). A ripple or a rocket
+  salvo comes back as one line with the best hit and the average. **Scores** in the Bombing Range menu
+  shows everyone's average and best, **Clear scores** starts over.
+* **HARM reaction:** fire an anti-radiation missile at the range SAM and after a few seconds the site
+  switches its radar off, like a real crew would, and comes back on a while after the missile is gone. You
+  see it drop off your RWR and you get a message. Switch it off from the SEAD menu (**HARM reaction
+  on/off**) if you just want to practise the shot.
+* **F10 map:** the range zones, each tanker's track with its radio, TACAN, flight level and speed, the
+  S-3B track and the carrier with its comms are drawn on the map, and they follow the assets. **Map
+  drawings on/off** in the range menu hides them.
 
 ---
 
@@ -101,6 +115,12 @@ That crossing is the window you have to intercept it.
 
 Nothing to type in. Scramble delay, spawn geometry, grace period and the target-size presets all
 live in the script's `CFG` if you want to tweak them.
+
+Once a target is up, every flight gets a **Bogey dope (intercept)** entry in the F10 menu, wherever it is.
+Call it and each pilot of the flight gets the target in BRAA from their own aircraft, closest first:
+*"Springfield 1-1, group BRAA 355/18, 20 thousand, HOT, HOSTILE."* Bearing magnetic, range in miles,
+altitude, and the aspect (HOT, FLANK, BEAM or DRAG with the direction it's heading). The zones are drawn on
+the F10 map so you can see the box and the objectives.
 
 ---
 
@@ -155,6 +175,7 @@ How it works:
   it down), but if more players join, it tops up for them.
 * Leaving a zone despawns its bandits, a bandit that wanders out of its arena for a minute is removed, and
   you get a "Splash" on every kill.
+* The three arenas are drawn on the F10 map with their names.
 
 **Loadouts:** the bandits fly **guns only out of the box** (the dogfight is fully playable like that). To
 arm them with missiles, open the `LOADOUTS` table at the top of the script and paste in the weapon CLSIDs
@@ -207,3 +228,19 @@ their route.
 Everything is driven from the **F10, Other** radio menu (the Intercept and air combat menus only show up
 inside their zones). Spawn what you want, fly the profile, and use the per-module **Reset** entries, or
 **Reset all** on the range, to clean up between runs.
+
+---
+
+## For mission makers: tests
+
+The repository has a test bench in `tests/`: it runs every script against a fake of the DCS scripting API,
+with the real mission from the `.miz`, and checks what the scripts do (spawns, menus, messages, radio and
+TACAN commands, scores, map drawings). You need Python and one package:
+
+```
+pip install lupa
+python tests/run_tests.py
+```
+
+It can't tell you what the AI does with a command, so a flight in the game is still the final check. After
+editing a script, `python tools/embed_scripts.py` puts the new copy into the `.miz` for you.

@@ -1,6 +1,6 @@
 -- =========================================================
 --  TRAINING_AirCombat.lua  (air-to-air arenas vs RED)
---  v1.1, feature-script style, native DCS scripting engine only
+--  v1.2, feature-script style, native DCS scripting engine only
 -- ---------------------------------------------------------
 --  Three zone-gated arenas, each with an F10 menu that appears only while a
 --  player is inside the matching zone:
@@ -16,6 +16,7 @@
 --
 --  REQUIRED ME ZONES (Circle or Quad):
 --    TR_DOGFIGHT_RED, TR_BVR_RED, TR_BVR_MIXED
+--  The three arenas are drawn on the F10 map with their names (CFG.markers).
 --
 --  LOADOUTS: empty by default = guns only (the dogfight is fully playable on
 --  guns). To arm the bandits, fill LOADOUTS below with the weapon CLSIDs from
@@ -57,6 +58,7 @@ local CFG = {
     },
     difficultyFactor  = { Easy = 1.5, Even = 2.0, Hard = 2.5 }, -- budget = players x factor
     defaultDifficulty = "Even",
+    markers           = true, -- draw the three arenas on the F10 map for BLUE
 }
 
 -- Selectable types (the 7 from the menu). type = exact DCS unit type string.
@@ -100,7 +102,11 @@ local function _dbg(msg, t) if CFG.debug then _out("[Air Combat][dbg] " .. tostr
 
 -- Zones, Circle or Quad. trigger.misc.getZone gives a Quad only its centre and
 -- stored radius, so the drawn corners are read from env.mission ("verticies",
--- the DCS spelling; y there means world z).
+-- the DCS spelling; y there means world z). The editor stores them in "Z"
+-- order (1-2 one side, 3-4 the opposite side in the same direction), not
+-- around the outline: taken as they come, the test sees a bow-tie and half
+-- the zone falls outside. Sorted by angle around the centre they make the
+-- outline whatever the order.
 local _quadCache = {}
 local function _zone(name)
     local q = _quadCache[name]
@@ -116,7 +122,9 @@ local function _zone(name)
                         poly[i] = { x = v.x, z = v.y }
                         cx, cz = cx + v.x, cz + v.y
                     end
-                    q = { poly = poly, cx = cx / #poly, cz = cz / #poly, r = 0 }
+                    cx, cz = cx / #poly, cz / #poly
+                    table.sort(poly, function(a, b) return math.atan2(a.z - cz, a.x - cx) < math.atan2(b.z - cz, b.x - cx) end)
+                    q = { poly = poly, cx = cx, cz = cz, r = 0 }
                     for _, p in ipairs(poly) do q.r = math.max(q.r, math.sqrt((p.x - q.cx) ^ 2 + (p.z - q.cz) ^ 2)) end
                 end
                 break
@@ -596,9 +604,37 @@ local function _checkZones()
     end
 end
 
+-- The arenas on the F10 map (DCS 2.7+), read-only, for BLUE. The ids come
+-- from a block of this script's own, apart from the other training scripts
+-- and from the players' map marks.
+local function _drawZones()
+    if not (CFG.markers and trigger.action.circleToAll and trigger.action.quadToAll and trigger.action.textToAll) then return end
+    local n, red = 7106000, { 1, 0.25, 0.25, 1 }
+    local function v3(x, z) return { x = x, y = 0, z = z } end
+    for _, a in ipairs({ { CFG.zones.dogfight, "Air combat: dogfight vs RED" }, { CFG.zones.bvr, "Air combat: BVR vs RED" },
+                         { CFG.zones.mixed, "Air combat: BVR mixed group" } }) do
+        local s = _zone(a[1])
+        if s then
+            local top = s.cx + s.r
+            n = n + 1
+            if s.poly and #s.poly == 4 then
+                local p = s.poly
+                top = math.max(p[1].x, p[2].x, p[3].x, p[4].x)
+                pcall(trigger.action.quadToAll, CFG.side, n, v3(p[1].x, p[1].z), v3(p[2].x, p[2].z), v3(p[3].x, p[3].z),
+                      v3(p[4].x, p[4].z), red, { 1, 0.25, 0.25, 0.06 }, 1, true, "")
+            elseif not s.poly then
+                pcall(trigger.action.circleToAll, CFG.side, n, v3(s.cx, s.cz), s.r, red, { 1, 0.25, 0.25, 0.06 }, 1, true, "")
+            end
+            n = n + 1
+            pcall(trigger.action.textToAll, CFG.side, n, v3(top + 800, s.cz), red, { 0, 0, 0, 0.35 }, 12, true, a[2])
+        end
+    end
+end
+
 if not AIRCOMBAT_Initialized then
     AIRCOMBAT_Initialized = true
     _checkZones()
+    _drawZones()
     world.addEventHandler(_handler)
     local period = math.max(1, CFG.tickSec)
     timer.scheduleFunction(function(a, time)

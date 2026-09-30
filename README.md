@@ -6,8 +6,8 @@ or all of them, in any order.
 
 | Script | What it does |
 |---|---|
-| [`TrainingRange.lua`](TrainingRange.lua) | F10 range: bombing, dogfight (missile protection + scoring), SEAD (radar + IR/AAA presets, missile protection), carrier ops, air-to-air refuelling |
-| [`TRAINING_Intercept.lua`](TRAINING_Intercept.lua) | Scramble-intercept trainer with a radio menu, random target launch, failure when the target reaches its objective or leaves the box |
+| [`TrainingRange.lua`](TrainingRange.lua) | F10 range: bombing (with impact scores), dogfight (missile protection + scoring), SEAD (radar + IR/AAA presets, missile protection, SAMs that go dark for a HARM), carrier ops, air-to-air refuelling, range drawn on the F10 map |
+| [`TRAINING_Intercept.lua`](TRAINING_Intercept.lua) | Scramble-intercept trainer with a radio menu, random target launch, failure when the target reaches its objective or leaves the box, Bogey dope (BRAA) on request |
 | [`TRAINING_GCA.lua`](TRAINING_GCA.lua) | Text Ground Controlled Approach (PAR talkdown), runway read from the airfield under the zone |
 | [`TRAINING_AirCombat.lua`](TRAINING_AirCombat.lua) | Air-to-air arenas vs RED: dogfight, BVR, and a mixed group that scales to player count |
 | [`JTAC.lua`](JTAC.lua) | Menu-spawned invisible spotter (MQ-9 UAV or ground JTAC) that lases RED targets; laser code and radio frequency changeable from the menu |
@@ -28,6 +28,7 @@ zones at load and shows a visible message if any are missing.
 
 **Zone sizes:** the Mission Editor shows the radius in the unit set in its options. With the
 editor in feet, typing `15000` makes a 15000 ft zone (4.6 km), not 15 km: the sizes below are metres.
+A Quad can be rotated and stretched freely; keep it convex (no corner pushed inward).
 
 **Defaults:** every radio, TACAN, ICLS and Link 4 value is set on the asset when it spawns, with no
 extra step. `TRAINING_Comms.lua` lists them all in flight.
@@ -73,6 +74,22 @@ extra step. `TRAINING_Comms.lua` lists them all in flight.
   its radar on but **holds fire** by default (`AAA live fire on/off` in the menu).
 * Bombing targets and the convoy are weapon-hold, so they never shoot back. The convoy loops its
   route for the whole mission.
+* **Bombing scores:** every bomb, rocket and air-to-ground missile a player releases within 30 km of
+  the bombing zones is followed to the ground. The pilot gets the distance from the nearest range
+  target, the clock position seen along the attack heading (12 o'clock = long, 6 o'clock = short)
+  and a grade (SHACK within 1.5 m, EXCELLENT 12.5 m, GOOD 25 m, INEFFECTIVE 50 m, else POOR, the
+  MOOSE range defaults); a ripple or a rocket salvo comes as one line with the best and the average.
+  Cluster dispensers are projected to the ground from where they open. **Scores** in the Bombing
+  Range menu lists every player; impacts more than 1000 m from any target are not scored.
+* **HARM reaction:** a range SAM an anti-radiation missile comes at switches its radar off after 3 to
+  10 s (the crew reacting) and back on 20 to 45 s after the missile has gone, so the shooter sees it
+  drop off the RWR. The site is the missile's target when the launch had one, otherwise the emitter
+  it flies at. The Rapier (optical) and the IR missiles have no radar and do not react. On by
+  default, `HARM reaction on/off` in the Radar Zone menu.
+* **F10 map:** the range zones with their names, each tanker's track with its radio, TACAN, level and
+  speed, the S-3B track and the carrier with its comms and BRC are drawn for BLUE, and follow the
+  assets (removed with them, redrawn when a speed or a course changes). `Map drawings on/off` in the
+  range menu.
 * The F10 menu is for the BLUE coalition only.
 
 ### TRAINING_Intercept.lua
@@ -87,6 +104,13 @@ extra step. `TRAINING_Comms.lua` lists them all in flight.
 
 No coordinates to fill in. The menu is per flight: several clients in one group share one menu.
 Tunables (scramble delay, spawn geometry, grace period, target-size presets) live in the script's `CFG`.
+
+**Bogey dope:** while a target is airborne, every BLUE flight has an F10 command `Bogey dope
+(intercept)`, wherever it is. Each pilot of the flight gets the targets in BRAA from their own
+aircraft, closest first: *"Springfield 1-1, group BRAA 355/18, 20 thousand, HOT, HOSTILE."* Bearings
+are magnetic (map grid corrected to true north, then the theatre's variation); the aspect follows the
+ACC thresholds (HOT to 30 degrees, FLANK to 60, BEAM to 120, then DRAG) with the target's direction.
+The zones are drawn on the F10 map.
 
 ### TRAINING_GCA.lua
 
@@ -113,7 +137,7 @@ bandit spawns ahead of you at the far edge of the zone, same altitude, and flies
 time, extra requests queue, and **Auto** brings up a fresh one a few seconds after each kill. The mixed arena
 spawns a package whose threat budget is `players x difficulty` (Easy/Even/Hard); kills are not replaced, the
 wave only grows when more players join. Leaving a zone despawns its bandits, and a bandit that stays out of
-its arena for a minute is removed.
+its arena for a minute is removed. The three arenas are drawn on the F10 map.
 
 Loadouts are **guns only by default** so the dogfight works out of the box. To arm the bandits with missiles,
 fill the `LOADOUTS` table at the top of the script with the weapon CLSIDs from your DCS version (they are
@@ -152,4 +176,26 @@ support assets and player flights).
 * The Immortal command (still sent in the dogfight and SEAD zones) protects only the host and single
   player; the missile protection is what works for clients in multiplayer.
 * Requires a reasonably recent DCS build. A couple of unit type strings can vary by version, so check the
-  in-game messages if a spawn fails: a failed spawn is reported, never announced as done.
+  in-game messages if a spawn fails: a failed spawn is reported, never announced as done. The F10 map
+  drawings and the radar switch of the HARM reaction need DCS 2.7 or later (on older builds the drawings
+  are skipped and the HARM reaction uses the alarm state alone).
+* Map drawings use ids from a block per script (7104000 range, 7105000 intercept, 7106000 air combat),
+  away from the small numbers the players' own map marks get.
+
+## Tests
+
+`tests/` runs every script against a fake of the DCS scripting API (`tests/mock_dcs.lua`) in Lua 5.1,
+the version DCS embeds, with the real mission table of the `.miz`: zones, date, weather, groups.
+
+```
+pip install lupa
+python tests/run_tests.py          # all the tests
+python tests/run_tests.py -v harm  # the tests with "harm" in the name, printing the scripts' log
+```
+
+They cover the logic of the scripts (geometry, menus, messages, commands sent, timers), not what DCS
+does with those commands: AI behaviour, radar and weapons still need a flight in the game. See
+[`tests/README.md`](tests/README.md).
+
+`python tools/embed_scripts.py` copies the repository's scripts into the `.miz` (what re-selecting each
+file in its trigger does in the editor); a test checks that the mission carries the current copies.

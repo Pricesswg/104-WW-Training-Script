@@ -1,6 +1,6 @@
 -- =========================================================
 --  TRAINING_Intercept.lua  (scramble intercept trainer)
---  v1.1, feature-script style, native DCS scripting engine only
+--  v1.2, feature-script style, native DCS scripting engine only
 -- ---------------------------------------------------------
 --  Arms when a BLUE player enters INTERCEPT_PLAYER_ZONE and
 --  exposes an F10 menu (only while in the zone). A scramble
@@ -8,6 +8,11 @@
 --  crosses INTERCEPT_LIMIT_ZONE toward a random objective. The
 --  intercept fails if the target reaches its objective or leaves
 --  the limit zone after a grace period.
+--
+--  BOGEY DOPE: while a target is airborne every BLUE flight has
+--  an F10 command "Bogey dope (intercept)", wherever it is. Each
+--  pilot of the flight gets the targets in BRAA from their own
+--  aircraft: magnetic bearing, range in NM, altitude, aspect.
 --
 --  REQUIRED ME ZONES (Circle or Quad):
 --    INTERCEPT_PLAYER_ZONE   arming / menu area
@@ -46,6 +51,8 @@ local CFG = {
     enemyCountry      = country.id.RUSSIA, -- targets are RED so they oppose BLUE
     side              = coalition.side.BLUE,
     defaultSize       = "Medium",
+    magvar            = nil,   -- magnetic variation for the bogey dope, degrees east; nil = from the theatre
+    markers           = true,  -- draw the zones on the F10 map for BLUE
     -- altitude tiers in FEET (converted to metres at spawn)
     altTiers = {
         { name = "LOW",  lo = 2000,  hi = 5000  },
@@ -71,17 +78,28 @@ local STATE = {
     targetSize      = CFG.defaultSize,
     targets         = {},   -- [groupName] = { spawnTime, obj }
     seq             = 0,
+    dope            = {},   -- [groupId] = "Bogey dope" menu item
 }
+
+-- Magnetic variation by theatre (degrees east), same values as TRAINING_GCA.lua.
+local MAGVAR = { Caucasus = 6.0, Syria = 5.0, PersianGulf = 2.5, Nevada = 11.5, MarianaIslands = 1.0,
+                 SinaiMap = 4.5, Sinai = 4.5, Kola = 12.0, Afghanistan = 3.0, Falklands = 3.0,
+                 Normandy = -1.0, TheChannel = 0.0, Iraq = 4.5, GermanyCW = 3.0 }
 
 -- ============== Helpers ==============
 local FT_TO_M = 0.3048
+local NM_M    = 1852
 
 local function _out(msg, t) trigger.action.outText(tostring(msg), t or 10) end
 local function _dbg(msg, t) if CFG.debug then _out("[Intercept][dbg] " .. tostring(msg), t or 6) end end
 
 -- Zones, Circle or Quad. trigger.misc.getZone gives a Quad only its centre and
 -- stored radius, so the drawn corners are read from env.mission ("verticies",
--- the DCS spelling; y there means world z).
+-- the DCS spelling; y there means world z). The editor stores them in "Z"
+-- order (1-2 one side, 3-4 the opposite side in the same direction), not
+-- around the outline: taken as they come, the test sees a bow-tie and half
+-- the zone falls outside. Sorted by angle around the centre they make the
+-- outline whatever the order.
 local _quadCache = {}
 local function _zoneShape(name)
     local q = _quadCache[name]
@@ -97,7 +115,9 @@ local function _zoneShape(name)
                         poly[i] = { x = v.x, z = v.y }
                         cx, cz = cx + v.x, cz + v.y
                     end
-                    q = { poly = poly, cx = cx / #poly, cz = cz / #poly, r = 0 }
+                    cx, cz = cx / #poly, cz / #poly
+                    table.sort(poly, function(a, b) return math.atan2(a.z - cz, a.x - cx) < math.atan2(b.z - cz, b.x - cx) end)
+                    q = { poly = poly, cx = cx, cz = cz, r = 0 }
                     for _, p in ipairs(poly) do q.r = math.max(q.r, math.sqrt((p.x - q.cx) ^ 2 + (p.z - q.cz) ^ 2)) end
                 end
                 break
@@ -225,8 +245,8 @@ local function _spawnTarget()
     end
     STATE.targets[name] = { spawnTime = timer.getTime(), obj = objName }
     _applyPassive(name)
-    _out(string.format("[Intercept] Target airborne: %s, %s tier (~%d ft), heading for %s. Vector and intercept.",
-        preset.label, tier.name, math.floor(altM / FT_TO_M + 0.5), objName), 12)
+    _out(string.format("[Intercept] Target airborne: %s, %s tier (~%d ft), heading for %s. Vector and intercept " ..
+        "(F10: Bogey dope for BRAA).", preset.label, tier.name, math.floor(altM / FT_TO_M + 0.5), objName), 12)
 end
 
 -- ============== Menu actions ==============
@@ -279,6 +299,114 @@ local function _despawnAll()
         n = n + 1
     end
     _out("[Intercept] Despawned " .. n .. " target(s).", 8)
+end
+
+-- ============== Bogey dope (BRAA) ==============
+-- Bearings are magnetic, as the cockpit reads them: map grid -> true north (on
+-- some maps the grid is a few degrees off) -> magnetic (variation by theatre).
+local function _angle(a, b) return math.abs((a - b + 540) % 360 - 180) end
+
+local function _magvar()
+    if CFG.magvar then return CFG.magvar end
+    local th = env and env.mission and env.mission.theatre
+    return MAGVAR[th] or 0
+end
+
+local function _gridNorth(p)
+    local ok, n = pcall(function()
+        local lat, lon = coord.LOtoLL({ x = p.x, y = 0, z = p.z })
+        local q = coord.LLtoLO(lat + 0.1, lon, 0)
+        return math.deg(math.atan2(q.z - p.z, q.x - p.x))
+    end)
+    return ok and n or 0
+end
+
+local function _brgText(deg)
+    local n = math.floor(deg + 0.5) % 360
+    return string.format("%03d", (n == 0) and 360 or n)
+end
+
+local CARD4 = { "NORTH", "EAST", "SOUTH", "WEST" }
+local function _card(deg) return CARD4[math.floor((deg % 360 + 45) / 90) % 4 + 1] end
+
+local function _altText(ft)
+    local k = math.floor(ft / 1000 + 0.5)
+    if k <= 0 then return (ft >= 250) and "500 ft" or "on the deck" end
+    return k .. " thousand"
+end
+
+-- "Enfield11" -> "Enfield 1-1"; the player name when there is no callsign.
+local function _callsign(u)
+    local ok, cs = pcall(function() return u:getCallsign() end)
+    if ok and type(cs) == "string" and cs ~= "" then
+        local n, a, b = cs:match("^(%a+)%s*(%d)%-?(%d)$")
+        if n then return n .. " " .. a .. "-" .. b end
+        return cs
+    end
+    local okp, pn = pcall(function() return u:getPlayerName() end)
+    return (okp and pn and pn ~= "") and pn or "Fighter"
+end
+
+-- BRAA of a target from a fighter. Aspect is the angle between the target's
+-- track and the line from the target to the fighter (ACC thresholds: HOT up to
+-- 30 degrees, FLANK to 60, BEAM to 120, then DRAG), with the target's track as
+-- a cardinal direction.
+local function _braa(me, tgt)
+    local p, q = me:getPoint(), tgt:getPoint()
+    local dx, dz = q.x - p.x, q.z - p.z
+    local brgGrid = math.deg(math.atan2(dz, dx)) % 360
+    local nm = math.sqrt(dx * dx + dz * dz) / NM_M
+    local v = tgt:getVelocity() or { x = 0, z = 0 }
+    local trk
+    if math.sqrt(v.x * v.x + v.z * v.z) > 5 then
+        trk = math.deg(math.atan2(v.z, v.x))
+    else
+        local o = tgt:getPosition().x
+        trk = math.deg(math.atan2(o.z, o.x))
+    end
+    local a = _angle(trk, brgGrid + 180)
+    local card = _card(trk - _gridNorth(q))
+    local aspect = (a <= 30 and "HOT") or (a <= 60 and "FLANK " .. card) or (a <= 120 and "BEAM " .. card) or ("DRAG " .. card)
+    local mag = (brgGrid - _gridNorth(p) - _magvar()) % 360
+    return string.format("BRAA %s/%d, %s, %s, HOSTILE", _brgText(mag), math.floor(nm + 0.5),
+                         _altText(q.y / FT_TO_M), aspect), nm
+end
+
+-- A group menu cannot tell which client asked, so every pilot of the flight
+-- gets the picture from their own aircraft, closest target first.
+local function _bogeyDope(gid)
+    local tgts = {}
+    for name in pairs(STATE.targets) do
+        local g = Group.getByName(name)
+        local u = g and g:getUnits()[1]
+        if u and u:isExist() then tgts[#tgts + 1] = u end
+    end
+    for _, me in pairs(coalition.getPlayers(CFG.side) or {}) do
+        local g = me and me:isExist() and me:getGroup()
+        if g and g:getID() == gid then
+            local text
+            if #tgts == 0 then
+                text = "clean, no targets airborne."
+            else
+                local calls = {}
+                for _, t in ipairs(tgts) do
+                    local s, nm = _braa(me, t)
+                    calls[#calls + 1] = { s = s, nm = nm }
+                end
+                table.sort(calls, function(x, y) return x.nm < y.nm end)
+                if #calls == 1 then
+                    text = "group " .. calls[1].s .. "."
+                else
+                    local parts = { #calls .. " groups." }
+                    for i, c in ipairs(calls) do
+                        parts[#parts + 1] = ((i == 1) and "Closest group " or "Next group ") .. c.s .. "."
+                    end
+                    text = table.concat(parts, " ")
+                end
+            end
+            trigger.action.outTextForUnit(me:getID(), "[Intercept] " .. _callsign(me) .. ", " .. text, 20)
+        end
+    end
 end
 
 -- ============== Per-group F10 menu (only while in the player zone) ==============
@@ -356,6 +484,29 @@ local function _tick(_, t)
         end
     end
 
+    -- Bogey dope: while a target is up every BLUE player group has the
+    -- command, wherever it flies (the scramble menu lives in the arming zone).
+    local groups = {}
+    if next(STATE.targets) then
+        for _, u in pairs(coalition.getPlayers(CFG.side) or {}) do
+            local g = u and u:isExist() and u:getGroup()
+            local gid = g and g:getID()
+            if gid then groups[gid] = true end
+        end
+    end
+    for gid in pairs(groups) do
+        if not STATE.dope[gid] then
+            STATE.dope[gid] = missionCommands.addCommandForGroup(gid, "Bogey dope (intercept)", nil,
+                function() _bogeyDope(gid) end)
+        end
+    end
+    for gid, item in pairs(STATE.dope) do
+        if not groups[gid] then
+            pcall(function() missionCommands.removeItemForGroup(gid, item) end)
+            STATE.dope[gid] = nil
+        end
+    end
+
     return t + CFG.tickSec
 end
 
@@ -395,9 +546,39 @@ local function _checkZones()
     return #missing == 0
 end
 
+-- The zones on the F10 map (DCS 2.7+), read-only, for BLUE. The ids come from
+-- a block of this script's own, apart from the other training scripts and
+-- from the players' map marks.
+local function _drawZones()
+    if not (CFG.markers and trigger.action.circleToAll and trigger.action.quadToAll and trigger.action.textToAll) then return end
+    local n = 7105000
+    local function v3(x, z) return { x = x, y = 0, z = z } end
+    local list = { { CFG.playerZone, "Intercept: arming area", { 1, 1, 0.2, 1 } },
+                   { CFG.limitZone, "Intercept: play box", { 1, 1, 0.2, 1 } } }
+    for i, o in ipairs(CFG.objectives) do list[#list + 1] = { o, "Intercept: objective " .. i, { 1, 0.5, 0, 1 } } end
+    for _, a in ipairs(list) do
+        local s, c = _zoneShape(a[1]), a[3]
+        if s then
+            local top, fill = s.cx + s.r, { c[1], c[2], c[3], 0.06 }
+            n = n + 1
+            if s.poly and #s.poly == 4 then
+                local p = s.poly
+                top = math.max(p[1].x, p[2].x, p[3].x, p[4].x)
+                pcall(trigger.action.quadToAll, CFG.side, n, v3(p[1].x, p[1].z), v3(p[2].x, p[2].z), v3(p[3].x, p[3].z),
+                      v3(p[4].x, p[4].z), c, fill, 1, true, "")
+            elseif not s.poly then
+                pcall(trigger.action.circleToAll, CFG.side, n, v3(s.cx, s.cz), s.r, c, fill, 1, true, "")
+            end
+            n = n + 1
+            pcall(trigger.action.textToAll, CFG.side, n, v3(top + 800, s.cz), c, { 0, 0, 0, 0.35 }, 12, true, a[2])
+        end
+    end
+end
+
 if not INTERCEPT_Initialized then
     INTERCEPT_Initialized = true
     _checkZones() -- visible error if any are missing; the tick no-ops safely meanwhile
+    _drawZones()
     world.addEventHandler(_handler)
     local period = math.max(1, CFG.tickSec)
     timer.scheduleFunction(function(a, time) local ok, e = pcall(_tick, a, time)
