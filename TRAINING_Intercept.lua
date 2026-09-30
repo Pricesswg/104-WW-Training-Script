@@ -1,17 +1,18 @@
 -- =========================================================
 --  TRAINING_Intercept.lua  (scramble intercept trainer)
---  v1.0, feature-script style, native DCS scripting engine only
+--  v1.1, feature-script style, native DCS scripting engine only
 -- ---------------------------------------------------------
 --  Arms when a BLUE player enters INTERCEPT_PLAYER_ZONE and
 --  exposes an F10 menu (only while in the zone). A scramble
 --  launches a passive target after a random delay; the target
---  transits INTERCEPT_LIMIT_ZONE toward a random objective and
---  despawns if it leaves the limit zone after a grace period.
+--  crosses INTERCEPT_LIMIT_ZONE toward a random objective. The
+--  intercept fails if the target reaches its objective or leaves
+--  the limit zone after a grace period.
 --
---  REQUIRED ME ZONES (type: Circle):
+--  REQUIRED ME ZONES (Circle or Quad):
 --    INTERCEPT_PLAYER_ZONE   arming / menu area
 --    INTERCEPT_LIMIT_ZONE    play box (spawn + boundary despawn)
---    INTERCEPT_OBJ_1/2/3     objective waypoints (zone centre)
+--    INTERCEPT_OBJ_1/2/3     objectives (the target flies to the centre)
 --
 --  Comments and in-game text in English (published on GitHub).
 -- =========================================================
@@ -38,7 +39,7 @@ local CFG = {
     objectives        = { "INTERCEPT_OBJ_1", "INTERCEPT_OBJ_2", "INTERCEPT_OBJ_3" },
     scrambleMin       = 60,    -- random scramble delay, seconds
     scrambleMax       = 180,
-    spawnRadiusFactor = 0.75,  -- spawn at radius * this from the limit-zone centre
+    spawnRadiusFactor = 0.75,  -- spawn at this fraction of the way from the centre to the zone edge
     jitterDeg         = 30,    -- +/- angular jitter on the spawn bearing
     graceSec          = 30,    -- boundary despawn inactive for this long after spawn
     tickSec           = 2,     -- master loop period (do not go below 1)
@@ -63,12 +64,12 @@ local SIZE_PRESETS = {
 
 -- ============== State (file-local) ==============
 local STATE = {
-    armed           = {},   -- [unitName] = { groupId, menuRoot }
+    armed           = {},   -- [groupId] = { menuRoot, members = { [unitName] = true } }
     scramblePending = false,
     scrambleToken   = 0,    -- bumped to invalidate a pending scramble (Abort)
     multiTrack      = false,
     targetSize      = CFG.defaultSize,
-    targets         = {},   -- [groupName] = { spawnTime }
+    targets         = {},   -- [groupName] = { spawnTime, obj }
     seq             = 0,
 }
 
@@ -78,9 +79,76 @@ local FT_TO_M = 0.3048
 local function _out(msg, t) trigger.action.outText(tostring(msg), t or 10) end
 local function _dbg(msg, t) if CFG.debug then _out("[Intercept][dbg] " .. tostring(msg), t or 6) end end
 
-local function _inZone(point, zone)
-    local dx, dz = point.x - zone.point.x, point.z - zone.point.z
-    return (dx * dx + dz * dz) <= (zone.radius * zone.radius)
+-- Zones, Circle or Quad. trigger.misc.getZone gives a Quad only its centre and
+-- stored radius, so the drawn corners are read from env.mission ("verticies",
+-- the DCS spelling; y there means world z).
+local _quadCache = {}
+local function _zoneShape(name)
+    local q = _quadCache[name]
+    if q == nil then
+        q = false
+        local list = env and env.mission and env.mission.triggers and env.mission.triggers.zones
+        for _, z in ipairs(list or {}) do
+            if z.name == name then
+                local verts = z.verticies or z.vertices
+                if z.type == 2 and verts and #verts >= 3 then
+                    local poly, cx, cz = {}, 0, 0
+                    for i, v in ipairs(verts) do
+                        poly[i] = { x = v.x, z = v.y }
+                        cx, cz = cx + v.x, cz + v.y
+                    end
+                    q = { poly = poly, cx = cx / #poly, cz = cz / #poly, r = 0 }
+                    for _, p in ipairs(poly) do q.r = math.max(q.r, math.sqrt((p.x - q.cx) ^ 2 + (p.z - q.cz) ^ 2)) end
+                end
+                break
+            end
+        end
+        _quadCache[name] = q
+    end
+    if q then return q end
+    local c = trigger.misc.getZone(name)
+    if c then return { cx = c.point.x, cz = c.point.z, r = c.radius } end
+    return nil
+end
+
+local function _inShape(p, s)
+    if not s then return false end
+    if s.poly then
+        local inside, j, poly = false, #s.poly, s.poly
+        for i = 1, #poly do
+            local a, b = poly[i], poly[j]
+            if ((a.z > p.z) ~= (b.z > p.z)) and (p.x < (b.x - a.x) * (p.z - a.z) / (b.z - a.z) + a.x) then
+                inside = not inside
+            end
+            j = i
+        end
+        return inside
+    end
+    local dx, dz = p.x - s.cx, p.z - s.cz
+    return (dx * dx + dz * dz) <= (s.r * s.r)
+end
+
+-- Distance from p along the unit vector d to the zone edge (first exit).
+local function _rayExit(p, d, s)
+    if not s.poly then
+        local fx, fz = p.x - s.cx, p.z - s.cz
+        local b = fx * d.x + fz * d.z
+        local disc = b * b - (fx * fx + fz * fz - s.r * s.r)
+        if disc < 0 then return 0 end
+        return math.max(0, -b + math.sqrt(disc))
+    end
+    local best
+    for i = 1, #s.poly do
+        local a, b = s.poly[i], s.poly[i % #s.poly + 1]
+        local ex, ez = b.x - a.x, b.z - a.z
+        local den = d.x * ez - d.z * ex
+        if math.abs(den) > 1e-9 then
+            local t = ((a.x - p.x) * ez - (a.z - p.z) * ex) / den
+            local u = ((a.x - p.x) * d.z - (a.z - p.z) * d.x) / den
+            if t > 0 and u >= 0 and u <= 1 and (not best or t < best) then best = t end
+        end
+    end
+    return best or 0
 end
 
 -- ============== Spawn ==============
@@ -110,25 +178,27 @@ local function _applyPassive(name)
 end
 
 local function _spawnTarget()
-    local limit = trigger.misc.getZone(CFG.limitZone)
+    local limit = _zoneShape(CFG.limitZone)
     if not limit then _out("[Intercept] Limit zone missing, cannot spawn.", 12); return end
 
-    -- Random objective; spawn on the OPPOSITE bearing so the target transits the box.
+    -- Random objective; spawn on the OPPOSITE side so the target crosses the box.
     local objName = CFG.objectives[math.random(#CFG.objectives)]
-    local obj = trigger.misc.getZone(objName)
+    local obj = _zoneShape(objName)
     if not obj then _out("[Intercept] Objective zone missing: " .. objName, 12); return end
 
-    local objBearing  = math.atan2(obj.point.x - limit.point.x, obj.point.z - limit.point.z)
-    local jitter      = math.rad(math.random(-CFG.jitterDeg, CFG.jitterDeg))
+    -- DCS world: x = north, z = east; a bearing b points (cos b, sin b).
+    local objBearing   = math.atan2(obj.cz - limit.cz, obj.cx - limit.cx)
+    local jitter       = math.rad(math.random(-CFG.jitterDeg, CFG.jitterDeg))
     local spawnBearing = objBearing + math.pi + jitter
-    local dist        = limit.radius * CFG.spawnRadiusFactor
-    local sx          = limit.point.x + math.sin(spawnBearing) * dist
-    local sz          = limit.point.z + math.cos(spawnBearing) * dist
+    local dir          = { x = math.cos(spawnBearing), z = math.sin(spawnBearing) }
+    local dist         = _rayExit({ x = limit.cx, z = limit.cz }, dir, limit) * CFG.spawnRadiusFactor
+    local sx           = limit.cx + dir.x * dist
+    local sz           = limit.cz + dir.z * dist
 
     local tier  = CFG.altTiers[math.random(#CFG.altTiers)]
     local altM  = math.random(tier.lo, tier.hi) * FT_TO_M
     local preset = SIZE_PRESETS[STATE.targetSize] or SIZE_PRESETS[CFG.defaultSize]
-    local hdg   = math.atan2(obj.point.x - sx, obj.point.z - sz) -- face the objective
+    local hdg   = math.atan2(obj.cz - sz, obj.cx - sx) -- face the objective
 
     STATE.seq = STATE.seq + 1
     local name = "INT_TGT_" .. STATE.seq
@@ -142,7 +212,7 @@ local function _spawnTarget()
         } },
         ["route"] = { ["points"] = {
             [1] = _airWP(sx, sz, altM, preset.speed),
-            [2] = _airWP(obj.point.x, obj.point.z, altM, preset.speed),
+            [2] = _airWP(obj.cx, obj.cz, altM, preset.speed),
         } },
     }
 
@@ -153,10 +223,10 @@ local function _spawnTarget()
         if env and env.info then env.info("[Intercept] addGroup error: " .. tostring(perr)) end
         return
     end
-    STATE.targets[name] = { spawnTime = timer.getTime() }
+    STATE.targets[name] = { spawnTime = timer.getTime(), obj = objName }
     _applyPassive(name)
-    _out(string.format("[Intercept] Target airborne: %s, %s tier (~%d ft). Vector and intercept.",
-        preset.label, tier.name, math.floor(altM / FT_TO_M + 0.5)), 12)
+    _out(string.format("[Intercept] Target airborne: %s, %s tier (~%d ft), heading for %s. Vector and intercept.",
+        preset.label, tier.name, math.floor(altM / FT_TO_M + 0.5), objName), 12)
 end
 
 -- ============== Menu actions ==============
@@ -194,12 +264,18 @@ local function _setSize(size)
     _out("[Intercept] Target size set to " .. SIZE_PRESETS[size].label .. ".", 8)
 end
 
+-- A target is forgotten BEFORE it is destroyed, so a despawn is never
+-- reported as a kill whatever event the destroy may raise.
+local function _despawn(name)
+    STATE.targets[name] = nil
+    local g = Group.getByName(name)
+    if g then g:destroy() end
+end
+
 local function _despawnAll()
     local n = 0
     for name in pairs(STATE.targets) do
-        local g = Group.getByName(name)
-        if g then g:destroy() end
-        STATE.targets[name] = nil
+        _despawn(name)
         n = n + 1
     end
     _out("[Intercept] Despawned " .. n .. " target(s).", 8)
@@ -221,52 +297,61 @@ end
 
 -- ============== Master tick: menu arming + boundary despawn ==============
 local function _tick(_, t)
-    -- Arm/disarm the per-group menu based on presence in the player zone.
-    local pzone = trigger.misc.getZone(CFG.playerZone)
+    -- Arm/disarm the menu per GROUP (F10 menus belong to groups): it is built
+    -- once when the first member enters the player zone and removed when the
+    -- last one has left. Several clients in one group share one menu.
+    local pzone = _zoneShape(CFG.playerZone)
     if pzone then
-        local players = coalition.getPlayers(CFG.side) or {}
-        local seen = {}
-        for _, u in pairs(players) do
-            if u and u:isExist() then
-                local nm = u:getName()
-                if _inZone(u:getPoint(), pzone) then
-                    seen[nm] = true
-                    if not STATE.armed[nm] then
-                        local g = u:getGroup()
-                        local gid = g and g:getID()
-                        if gid then
-                            STATE.armed[nm] = { groupId = gid, menuRoot = _buildMenuForGroup(gid) }
-                            trigger.action.outTextForUnit(u:getID(), "[Intercept] Scramble control available, F10 radio menu.", 10)
-                        end
-                    end
+        local inside = {} -- [groupId] = { unitName = unit }
+        for _, u in pairs(coalition.getPlayers(CFG.side) or {}) do
+            if u and u:isExist() and _inShape(u:getPoint(), pzone) then
+                local g = u:getGroup()
+                local gid = g and g:getID()
+                if gid then
+                    inside[gid] = inside[gid] or {}
+                    inside[gid][u:getName()] = u
                 end
             end
         end
-        for nm, info in pairs(STATE.armed) do
-            if not seen[nm] then
-                pcall(function() missionCommands.removeItemForGroup(info.groupId, info.menuRoot) end)
-                STATE.armed[nm] = nil
+        for gid, members in pairs(inside) do
+            local a = STATE.armed[gid]
+            if not a then
+                a = { menuRoot = _buildMenuForGroup(gid), members = {} }
+                STATE.armed[gid] = a
+            end
+            for nm, u in pairs(members) do
+                if not a.members[nm] then
+                    trigger.action.outTextForUnit(u:getID(), "[Intercept] Scramble control available, F10 radio menu.", 10)
+                end
+            end
+            a.members = members
+        end
+        for gid, a in pairs(STATE.armed) do
+            if not inside[gid] then
+                pcall(function() missionCommands.removeItemForGroup(gid, a.menuRoot) end)
+                STATE.armed[gid] = nil
             end
         end
     end
 
-    -- Boundary despawn: drop targets that left the limit zone after the grace period.
-    local lzone = trigger.misc.getZone(CFG.limitZone)
-    if lzone then
-        local now = timer.getTime()
-        for name, info in pairs(STATE.targets) do
-            local g = Group.getByName(name)
-            if not g then
-                STATE.targets[name] = nil -- killed or already gone
-            else
-                local us = g:getUnits()
-                local u  = us and us[1]
-                if u and (now - info.spawnTime) > CFG.graceSec and not _inZone(u:getPoint(), lzone) then
-                    local utype = (u.getTypeName and u:getTypeName()) or "target"
-                    g:destroy()
-                    STATE.targets[name] = nil
-                    _out("[Intercept] " .. utype .. " reached the boundary and escaped. Intercept failed.", 12)
-                end
+    -- Failure: the target reached its objective, or left the limit zone after
+    -- the grace period.
+    local lzone = _zoneShape(CFG.limitZone)
+    local now = timer.getTime()
+    for name, info in pairs(STATE.targets) do
+        local g = Group.getByName(name)
+        local u = g and g:getUnits()[1]
+        if not u then
+            STATE.targets[name] = nil -- killed or already gone
+        else
+            local p = u:getPoint()
+            local utype = (u.getTypeName and u:getTypeName()) or "target"
+            if _inShape(p, _zoneShape(info.obj)) then
+                _despawn(name)
+                _out("[Intercept] " .. utype .. " reached " .. info.obj .. ". Intercept failed.", 12)
+            elseif lzone and (now - info.spawnTime) > CFG.graceSec and not _inShape(p, lzone) then
+                _despawn(name)
+                _out("[Intercept] " .. utype .. " reached the boundary and escaped. Intercept failed.", 12)
             end
         end
     end
@@ -275,20 +360,23 @@ local function _tick(_, t)
 end
 
 -- ============== Splash feedback (real kills only) ==============
--- Only weapon kills fire S_EVENT_DEAD; destroy() (boundary despawn / Despawn
--- all) does not, so "Splash" is never announced for a despawn.
+-- S_EVENT_DEAD does not always come for an aircraft that is not destroyed at
+-- once, so S_EVENT_UNIT_LOST counts too. The target entry is removed on the
+-- first event, so a kill is announced once; despawns clear it beforehand.
 local _handler = {}
 function _handler:onEvent(event)
     local ok, err = pcall(function()
-        if not event or event.id ~= world.event.S_EVENT_DEAD then return end
+        if not event then return end
+        local lost = world.event.S_EVENT_UNIT_LOST and event.id == world.event.S_EVENT_UNIT_LOST
+        if event.id ~= world.event.S_EVENT_DEAD and not lost then return end
         local u = event.initiator
-        if not u or not u.getGroup then return end -- StaticObjects have no getGroup
-        local g = u:getGroup()
-        local gname = g and g:getName()
+        if not u or not u.getName then return end
+        local uname = u:getName()
+        local gname = uname and uname:match("^(INT_TGT_%d+)_%d+$")
         if not gname or not STATE.targets[gname] then return end
         STATE.targets[gname] = nil
-        local utype = (u.getTypeName and u:getTypeName()) or "target"
-        _out("[Intercept] Splash! " .. utype .. " down. Intercept successful.", 12)
+        local okt, utype = pcall(function() return u:getTypeName() end)
+        _out("[Intercept] Splash! " .. ((okt and utype) or "target") .. " down. Intercept successful.", 12)
     end)
     if not ok and env and env.info then env.info("[Intercept] onEvent error: " .. tostring(err)) end
 end
@@ -299,7 +387,7 @@ local function _checkZones()
     local required = { CFG.playerZone, CFG.limitZone }
     for _, z in ipairs(CFG.objectives) do required[#required + 1] = z end
     for _, zn in ipairs(required) do
-        if not trigger.misc.getZone(zn) then missing[#missing + 1] = zn end
+        if not _zoneShape(zn) then missing[#missing + 1] = zn end
     end
     if #missing > 0 then
         _out("[Intercept] MISSING ZONES: " .. table.concat(missing, ", ") .. ". Create them in the Mission Editor.", 30)
@@ -309,7 +397,6 @@ end
 
 if not INTERCEPT_Initialized then
     INTERCEPT_Initialized = true
-    pcall(function() math.randomseed(os.time()) end)
     _checkZones() -- visible error if any are missing; the tick no-ops safely meanwhile
     world.addEventHandler(_handler)
     local period = math.max(1, CFG.tickSec)
