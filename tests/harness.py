@@ -90,11 +90,12 @@ class Sim:
         ms = kt * 0.514444
         self.run(f'MOCK.wind = {{ x = {ms * math.cos(to)}, y = 0, z = {ms * math.sin(to)} }}')
 
-    def clients(self, gname, gid, specs):
+    def clients(self, gname, gid, specs, cat=None):
         """A client group with players: specs are dicts with name, x, y (alt), z,
-        optional hdg (radians), air, player, callsign, v = {x, y, z}."""
+        optional hdg and pitch (radians), air, player, callsign, type,
+        v = {x, y, z}, ammo. cat=1 makes it a helicopter group."""
         t = self.lua.table_from([self.lua.table_from(s, recursive=True) for s in specs])
-        self.g.MOCK.addClientGroup(gname, gid, t)
+        self.g.MOCK.addClientGroup(gname, gid, t, cat)
 
     def unit_id(self, name):
         return self.ev(f'return MOCK.units["{name}"].id')

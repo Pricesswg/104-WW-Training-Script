@@ -7,7 +7,7 @@ of them or only the one you need.
 
 | Script | What you get |
 |---|---|
-| `TrainingRange.lua` | An F10 range: bombing targets with impact scores, a dogfight arena, SEAD threats that hide from HARMs, carrier ops and air-to-air tankers, all drawn on the F10 map |
+| `TrainingRange.lua` | An F10 range: bombing targets with impact scores, a strafe pit, a dogfight arena, SEAD threats that hide from HARMs, carrier ops with LSO landing grades and air-to-air tankers, all drawn on the F10 map |
 | `TRAINING_Intercept.lua` | A scramble-intercept trainer with its own radio menu and a Bogey dope (BRAA) call |
 | `TRAINING_GCA.lua` | A text Ground Controlled Approach that talks you down to a runway |
 | `TRAINING_AirCombat.lua` | Air-to-air arenas against RED: dogfight, BVR, and a mixed group that scales to the number of players |
@@ -59,6 +59,7 @@ Every spawn point is a zone. Create these (Circle or Quad):
 | `TR_CARRIER` | any | Carrier strike group. The carrier plus its escort screen spawns at the centre at mission start. Put it on open water with sea room around it. |
 | `TR_REFUEL_BASKET` | Quad ~60 x 15 km | Basket (probe-and-drogue) tanker. Draw the Quad along the track you want: the racetrack follows its long side. A Circle works too (the track heading is then in `TR_Config`). |
 | `TR_REFUEL_BOOM` | Quad ~60 x 15 km | Boom tanker. Same. |
+| `TR_STRAFE` | ~200 m | Strafe pit. The targets stand in a row at its centre; you run in on the heading in `TR_Config.strafe` (360 by default, from the south), or along the long side if you draw a Quad. Pick flat ground with a clear approach. |
 
 A few notes:
 
@@ -76,12 +77,29 @@ A few notes:
   speed from the **Refueling** menu, in indicated airspeed (220, 250, 280, 310 KIAS).
 * The **S-3B recovery tanker** (`253.000 AM / 53Y RCV`) flies a racetrack 2 NM off the carrier's port side at
   6000 ft and moves with the boat as it steams.
+* **LSO grades:** every time you fly the groove to the carrier, the script grades it like a landing signal
+  officer. It watches your glideslope, line-up and angle of attack at the start (3/4 mile), in the middle, in
+  close and at the ramp, gives you the live calls ("Roger ball", "Power", "Right for lineup", "You're slow",
+  and "Wave off" if you are too far off in close), and at the end you get something like *"Eagle1: (OK),
+  3-wire. (LO)X LOIM LULIC"*. The shorthand is the LSO's: `(LO)` a little low, `LO` low, `_LO_` well low,
+  and the same for `H` (high), `LUL`/`LUR` (lined up left/right), `F`/`SLO` (fast/slow), at `X` (start), `IM`
+  (in the middle), `IC` (in close), `AR` (at the ramp). `OK` if you only had small deviations, `(OK)` with a
+  normal one, `--` with a big one, plus `-- (BOLTER)`, `WO` (waved off), `OWO` (your own wave-off) and `CUT`
+  (landed after a wave-off). **LSO grades (greenie board)** in Carrier Ops shows everyone's grades and
+  average points; the live calls can be switched off. With a Supercarrier, DCS's own LSO grade shows up
+  too. The angle of attack is checked for the F/A-18C and the F-14.
 * **SEAD and dogfight protection:** missiles fired by the range's SAMs, and missiles fired between players
   in the dogfight arena, are removed just before they reach you, and you get a "hit" message instead. This
   works in multiplayer, where the Immortal command does not protect client aircraft. Bullets can't be
   intercepted, so the range AAA keeps its radar on but holds fire unless you switch **AAA live fire** on.
 * The bombing targets (Ural, BTR-80, T-90) and the convoy are all weapon-hold, so they never shoot back.
   The convoy keeps driving its loop for the whole mission.
+* **Strafe pit:** three T-90s wait in a row at `TR_STRAFE` from mission start. Fly into the box in front of
+  them (3 km long, 300 m wide, below 3000 ft, heading for the targets) and you get *"rolling in, cleared
+  hot"*; when you leave the box you get your hits over the rounds you fired, like *"23 hits of 61 rounds,
+  38%, INEFFECTIVE PASS"*. Don't fire from inside the foul line (2000 ft): a hit or a burst from there
+  makes the pass invalid. A target that gets destroyed comes back after 10 seconds. **Scores** shows the
+  pit next to the bombs.
 * **Bombing scores:** drop a bomb, fire rockets or an air-to-ground missile near the range and the script
   follows it to the ground. You get something like *"Mk-82: 18 m at 5 o'clock from T-90, GOOD"*: the
   distance from the nearest target, the clock position seen along your attack heading (12 o'clock is
@@ -92,9 +110,9 @@ A few notes:
   switches its radar off, like a real crew would, and comes back on a while after the missile is gone. You
   see it drop off your RWR and you get a message. Switch it off from the SEAD menu (**HARM reaction
   on/off**) if you just want to practise the shot.
-* **F10 map:** the range zones, each tanker's track with its radio, TACAN, flight level and speed, the
-  S-3B track and the carrier with its comms are drawn on the map, and they follow the assets. **Map
-  drawings on/off** in the range menu hides them.
+* **F10 map:** the range zones, the strafe pit's box and foul line, each tanker's track with its radio,
+  TACAN, flight level and speed, the S-3B track and the carrier with its comms are drawn on the map, and
+  they follow the assets. **Map drawings on/off** in the range menu hides them.
 
 ---
 

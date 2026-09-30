@@ -361,7 +361,7 @@ def bomb_scores_distance_clock_and_grade():
 
     board = sim.mark()
     sim.click('Training Range/Bombing Range/Scores')
-    rows = sim.find(r'Scores, average distance', board)
+    rows = sim.find(r'Bombs, average distance', board)
     check(rows and re.search(r'1\. Eagle1: 3 weapon\(s\), average (9|10) m, best [01] m \(SHACK\), 1 shack\(s\)', rows[0]),
           f'scoreboard: {rows}')
 
@@ -412,6 +412,277 @@ def bomb_scores_salvo_airburst_and_what_is_not_scored():
     bomb_run(sim, 'TR_ARMOR_L_1_1')
     sim.advance(2)
     check(not bombing_msgs(sim, since), 'an AI bomb was scored')
+
+
+# ===========================================================================
+# TrainingRange: strafe pit
+# ===========================================================================
+GUN = [{'count': 578, 'desc': {'category': 0, 'typeName': 'weapons.shells.M61_20_HE'}}]
+
+
+def strafe_sim():
+    sim = Sim()
+    z = sim.zone('TR_STRAFE')
+    sim.clients('F18', 1, [{'name': 'Aerial-1-1', 'player': 'Eagle1', 'x': z['x'] - 5000, 'y': 300, 'z': z['z'],
+                            'hdg': 0, 'v': {'x': 200, 'y': 0, 'z': 0}, 'ammo': GUN}])
+    sim.load('TrainingRange.lua')
+    sim.advance(2)
+    return sim, z
+
+
+def fly_north(sim, to_x, step=0.1):
+    sim.run(f'local u = MOCK.units["Aerial-1-1"]; while u.p.x < {to_x} do u.p.x = u.p.x + 200 * {step}; MOCK.advance({step}) end')
+
+
+def burst(sim, rounds, hits, weapon='nil', target='TR_STRAFE_2_1'):
+    sim.run(f'''local u = MOCK.units["Aerial-1-1"]; u.ammo[1].count = u.ammo[1].count - {rounds}
+        local t = MOCK.units["{target}"]
+        MOCK.fire({{ id = world.event.S_EVENT_SHOOTING_START, initiator = u }})
+        for i = 1, {hits} do MOCK.fire({{ id = world.event.S_EVENT_HIT, initiator = u, target = t, weapon = {weapon} }}) end
+        MOCK.fire({{ id = world.event.S_EVENT_SHOOTING_END, initiator = u }})''')
+
+
+def pull_off(sim):
+    sim.run('local u = MOCK.units["Aerial-1-1"]; u.p.z = u.p.z + 1000')
+    sim.advance(3)
+
+
+@test
+def strafe_pit_pass_foul_and_scores():
+    sim, z = strafe_sim()
+    xs = sorted(sim.ev(f'return MOCK.units["TR_STRAFE_{i}_1"].p.z') for i in (1, 2, 3))
+    check(abs(xs[1] - z['z']) < 1 and abs(xs[2] - xs[1] - 30) < 1 and abs(xs[1] - xs[0] - 30) < 1,
+          f'targets not in a row across a northbound run-in: {xs}')
+
+    since = sim.mark()
+    fly_north(sim, z['x'] - 1500)
+    check(sim.to_unit('Aerial-1-1', since) and 'rolling in' in sim.to_unit('Aerial-1-1', since)[0], 'no rolling-in call')
+    burst(sim, 60, 20)
+    burst(sim, 0, 3, weapon='MOCK.newWeapon({ category = 3, displayName = "Mk-82" }, { x = 0, y = 0, z = 0 })')
+    fly_north(sim, z['x'] - 800)
+    pull_off(sim)
+    res = sim.find(r'\[Strafe pit\] Eagle1: ', since)
+    check(res and '20 hits of 60 rounds, 33%, INEFFECTIVE PASS' in res[-1], f'pass result (bombs must not count): {res}')
+
+    since = sim.mark()
+    sim.run(f'local u = MOCK.units["Aerial-1-1"]; u.p.x, u.p.z = {z["x"] - 3500}, {z["z"]}')
+    fly_north(sim, z['x'] - 400)  # inside the 610 m foul line
+    burst(sim, 30, 10)
+    pull_off(sim)
+    check(sim.find('FOUL LINE', since), 'no foul line call')
+    check(sim.find(r'0 hits of 30 rounds, 0%, \* INVALID', since), f'hits from inside the foul line counted: {sim.log(since)[-3:]}')
+
+    since = sim.mark()
+    sim.run(f'local u = MOCK.units["Aerial-1-1"]; u.p.x, u.p.z = {z["x"] - 2800}, {z["z"]}')
+    fly_north(sim, z['x'] - 2700)
+    burst(sim, 60, 55)
+    sim.advance(1)
+    sim.run(f'local u = MOCK.units["Aerial-1-1"]; u.p.x = {z["x"] - 2000}')
+    sim.advance(0.5)
+    fly_north(sim, z['x'] - 1000)
+    pull_off(sim)
+    check(sim.find(r'55 hits of 60 rounds, 92%, DEADEYE PASS', since), f'deadeye pass: {sim.find("Strafe pit", since)}')
+
+    since = sim.mark()
+    sim.run(f'local u = MOCK.units["Aerial-1-1"]; u.p.x, u.p.z = {z["x"] - 1200}, {z["z"]}')
+    sim.advance(1)
+    pull_off(sim)
+    check(sim.find('left the box too quickly', since), 'a one-second pass was scored')
+
+    board = sim.mark()
+    sim.click('Training Range/Bombing Range/Scores')
+    b = '\n'.join(sim.log(board))
+    check('Eagle1: 2 pass(es), 75 hits of 120 rounds (63%), best pass 92%, 1 foul(s)' in b, f'scoreboard: {b}')
+
+    sim.run('local u = MOCK.units["TR_STRAFE_1_1"]; u.alive = false; MOCK.fire({ id = world.event.S_EVENT_DEAD, initiator = u })')
+    sim.advance(11)
+    check(sim.ev('return Group.getByName("TR_STRAFE_1") ~= nil'), 'a destroyed strafe target did not come back')
+    check(counts(sim)['line'] >= 1 and 'Strafe pit: run-in 360, foul line 2000 ft' in list(sim.g.MOCK.markTexts().values()),
+          'strafe pit not drawn on the map')
+
+
+# ===========================================================================
+# TrainingRange: LSO
+# ===========================================================================
+LSO_LUA = '''
+function LSO_GEOM()
+    local ship = MOCK.units["TR_CARRIER"]
+    local h = ship.hdg
+    local fb = h - math.rad(9.1359)
+    local sx = ship.p.x + math.cos(h) * -153 + math.cos(fb + math.pi / 2) * 7
+    local sz = ship.p.z + math.sin(h) * -153 + math.sin(fb + math.pi / 2) * 7
+    return { fb = fb, sx = sx, sz = sz, lx = sx + math.cos(fb) * 70, lz = sz + math.sin(fb) * 70 }
+end
+-- Down the landing area from d0 to d1 metres before the 3-wire point, gse degrees
+-- off the 3.5 degree glide path, lue degrees lined up left, at an angle of attack.
+function APPROACH(name, d0, d1, gse, lue, aoa, speed, air)
+    local G = LSO_GEOM()
+    local u = MOCK.units[name]
+    local gam, s = math.rad(3.5 + gse), speed or 70
+    local lx, lz = -math.cos(G.fb + math.pi / 2), -math.sin(G.fb + math.pi / 2)
+    local d = d0
+    while d > d1 do
+        local side = math.max(d, 50) * math.tan(math.rad(lue))
+        u.p.x = G.lx - math.cos(G.fb) * d + lx * side
+        u.p.z = G.lz - math.sin(G.fb) * d + lz * side
+        u.p.y = 20.3 + math.max(d, 0) * math.tan(gam)
+        u.v = { x = math.cos(G.fb) * s, y = -s * math.tan(gam), z = math.sin(G.fb) * s }
+        u.hdg, u.pitch, u.air = G.fb, math.rad(aoa) - gam, (air ~= false)
+        MOCK.advance(0.1)
+        d = d - s * 0.1
+    end
+end
+-- Straight on along the landing area, climbing, for dist metres.
+function CLIMBOUT(name, dist)
+    local G = LSO_GEOM()
+    local u = MOCK.units[name]
+    for _ = 1, math.floor(dist / 7) do
+        u.p.x, u.p.z, u.p.y = u.p.x + math.cos(G.fb) * 7, u.p.z + math.sin(G.fb) * 7, u.p.y + 3
+        u.v = { x = math.cos(G.fb) * 70, y = 30, z = math.sin(G.fb) * 70 }
+        MOCK.advance(0.1)
+    end
+end
+-- Roll out on the deck and stop `stop` metres up the landing area from the ramp.
+function TRAP(name, stop)
+    local G = LSO_GEOM()
+    local u = MOCK.units[name]
+    u.air = false
+    for k = 1, 20 do
+        local d = 70 + (stop - 70) * k / 20
+        u.p.x, u.p.z, u.p.y = G.sx + math.cos(G.fb) * d, G.sz + math.sin(G.fb) * d, 18.3
+        local s = 70 * (1 - k / 20)
+        u.v = { x = math.cos(G.fb) * s, y = 0, z = math.sin(G.fb) * s }
+        MOCK.advance(0.1)
+    end
+    MOCK.advance(1)
+end
+'''
+
+
+def lso_sim(type_name='FA-18C_hornet', cat=None):
+    sim = Sim()
+    z = sim.zone('TR_CARRIER')
+    sim.clients('F18', 1, [{'name': 'Aerial-1-1', 'player': 'Eagle1', 'type': type_name,
+                            'x': z['x'] + 20000, 'y': 500, 'z': z['z']}], cat)
+    sim.load('TrainingRange.lua')
+    sim.run(LSO_LUA)
+    sim.advance(3)
+    return sim
+
+
+def lso_result(sim, since):
+    return [m for m in sim.to_unit('Aerial-1-1', since) if '[LSO] Eagle1:' in m]
+
+
+NM1 = 1.1 * NM
+
+
+@test
+def lso_ok_pass_trap_and_wire():
+    sim = lso_sim()
+    since = sim.mark()
+    sim.run(f'APPROACH("Aerial-1-1", {NM1}, 0, 0, 0, 8.1)')
+    sim.run('TRAP("Aerial-1-1", 164)')  # about 100 m past the 3-wire
+    res = lso_result(sim, since)
+    check(len(res) == 1, f'expected one grade, got {res}')
+    check(res[0].endswith('Eagle1: OK, 3-wire. no deviations'), f'perfect pass: {res[0]}')
+    check(any('roger ball' in m for m in sim.to_unit('Aerial-1-1', since)), 'no roger ball')
+    since = sim.mark()
+    sim.run('MOCK.fire({ id = world.event.S_EVENT_LANDING_QUALITY_MARK, initiator = MOCK.units["Aerial-1-1"], '
+            'comment = "LSO: GRADE:_OK_ : WIRE# 3" })')
+    check(any('[LSO] DCS: LSO: GRADE:_OK_ : WIRE# 3' in m for m in sim.to_unit('Aerial-1-1', since)),
+          'the native LSO grade was not passed on')
+
+
+@test
+def lso_deviations_grades_and_calls():
+    # A little low all the way, on speed: small deviations do not cost the grade.
+    sim = lso_sim()
+    since = sim.mark()
+    sim.run(f'APPROACH("Aerial-1-1", {NM1}, 0, -0.4, 0, 8.1)')
+    sim.run('TRAP("Aerial-1-1", 150)')
+    res = lso_result(sim, since)
+    check(res and 'OK, 2-wire. (LO)X (LO)IM (LO)IC (LO)AR' in res[0], f'slightly low pass: {res}')
+
+    # Low (normal deviation) and slow: a fair pass, with "Power" calls.
+    since = sim.mark()
+    sim.run(f'APPROACH("Aerial-1-1", {NM1}, 0, -0.7, 0, 9.5)')
+    sim.run('TRAP("Aerial-1-1", 164)')
+    res = lso_result(sim, since)
+    check(res and '(OK), 3-wire. SLOLOX SLOLOIM SLOLOIC SLOLOAR' in res[0], f'low and slow pass: {res}')
+    calls = [m for m in sim.to_unit('Aerial-1-1', since) if 'clear]' in m]
+    check(any('Power.' in m and "You're slow." in m for m in calls), f'no live calls: {calls[:3]}')
+
+    # Lined up left 2.9 degrees (under the 3 degree wave-off limit): a fair pass.
+    since = sim.mark()
+    sim.run(f'APPROACH("Aerial-1-1", {NM1}, 0, 0, 2.9, 8.1)')
+    sim.run('TRAP("Aerial-1-1", 175)')
+    res = lso_result(sim, since)
+    check(res and '(OK), 4-wire. LULX LULIM LULIC LULAR' in res[0], f'lined up left 2.9 deg: {res}')
+    calls = [m for m in sim.to_unit('Aerial-1-1', since) if 'clear]' in m]
+    check(any('Right for lineup.' in m for m in calls), 'no "Right for lineup"')
+
+    # Well low but above the wave-off limit: large deviations, no grade.
+    since = sim.mark()
+    sim.run(f'APPROACH("Aerial-1-1", {NM1}, 0, -1.0, 0, 8.1)')
+    sim.run('TRAP("Aerial-1-1", 150)')
+    res = lso_result(sim, since)
+    check(res and '--, 2-wire. _LO_X _LO_IM _LO_IC _LO_AR' in res[0], f'1 degree low: {res}')
+
+    # The Tomcat has its own on-speed angle of attack (15 units = 10.36 deg).
+    sim = lso_sim('F-14B')
+    since = sim.mark()
+    sim.run(f'APPROACH("Aerial-1-1", {NM1}, 0, 0, 0, 10.4)')
+    sim.run('TRAP("Aerial-1-1", 164)')
+    res = lso_result(sim, since)
+    check(res and 'OK, 3-wire. no deviations' in res[0], f'Tomcat on speed: {res}')
+
+    board = sim.mark()
+    sim.click('Training Range/Carrier Ops/LSO grades (greenie board)')
+    b = '\n'.join(sim.log(board))
+    check('1. Eagle1: 4.00 over 1 pass(es) | OK' in b, f'greenie board: {b}')
+
+
+@test
+def lso_waveoff_bolter_owo_and_who_is_graded():
+    # Low in close: waved off, and flies past the bow.
+    sim = lso_sim()
+    since = sim.mark()
+    sim.run(f'APPROACH("Aerial-1-1", {NM1}, -400, -1.5, 0, 8.1)')
+    msgs = sim.to_unit('Aerial-1-1', since)
+    check(any('WAVE OFF, WAVE OFF!' in m for m in msgs), 'no wave-off call at 1.5 deg low in close')
+    res = lso_result(sim, since)
+    check(res and 'WO (waved off)' in res[0] and 'waved off: too low' in res[0], f'wave-off: {res}')
+
+    # Touch and go: bolter.
+    since = sim.mark()
+    sim.run(f'APPROACH("Aerial-1-1", {NM1}, 0, 0, 0, 8.1)')
+    sim.run('APPROACH("Aerial-1-1", 0, -40, 0, 0, 8.1, 70, false)')   # on the deck for half a second
+    sim.run('APPROACH("Aerial-1-1", -40, -500, 0, 0, 8.1)')           # and off again
+    res = lso_result(sim, since)
+    check(res and '-- (BOLTER)' in res[0], f'bolter: {res}')
+
+    # Climbs away at the ramp without being waved off: own wave-off.
+    since = sim.mark()
+    sim.run(f'APPROACH("Aerial-1-1", {NM1}, 110, 0, 0, 8.1)')
+    sim.run('CLIMBOUT("Aerial-1-1", 700)')
+    res = lso_result(sim, since)
+    check(res and 'OWO (own wave-off)' in res[0], f'own wave-off: {res}')
+
+    # Calls off: still graded, no live calls.
+    since = sim.mark()
+    sim.click('Training Range/Carrier Ops/LSO live calls on/off')
+    sim.run(f'APPROACH("Aerial-1-1", {NM1}, 0, -0.7, 0, 8.1)')
+    sim.run('TRAP("Aerial-1-1", 164)')
+    check(not [m for m in sim.to_unit('Aerial-1-1', since) if 'clear]' in m], 'live calls with the calls off')
+    check(lso_result(sim, since), 'no grade with the calls off')
+
+    # A helicopter on the same path is not graded.
+    sim = lso_sim('SH-60B', cat=1)
+    since = sim.mark()
+    sim.run(f'APPROACH("Aerial-1-1", {NM1}, 0, 0, 0, 8.1)')
+    sim.run('TRAP("Aerial-1-1", 164)')
+    check(not lso_result(sim, since), 'a helicopter was graded')
 
 
 # ===========================================================================
@@ -513,7 +784,8 @@ def map_drawings_zones_tankers_carrier():
     sim = Sim().load('TrainingRange.lua')
     sim.advance(2)
     c = counts(sim)
-    check(c == {'quad': 3, 'circle': 4, 'line': 0, 'text': 7}, f'initial drawings: {c} (3 quads + 3 circles + carrier)')
+    check(c == {'quad': 4, 'circle': 4, 'line': 1, 'text': 8},
+          f'initial drawings: {c} (3 zone quads + strafe box, 3 zone circles + carrier, foul line)')
     texts = list(sim.g.MOCK.markTexts().values())
     check(any('TR_CARRIER (Stennis) | 127.500 AM | TACAN 74X STN | ICLS 11' in t for t in texts), f'carrier label: {texts}')
     check(sim.ev('for _, m in pairs(MOCK.marks) do if m.side ~= 2 then return false end end return true'),
@@ -521,21 +793,21 @@ def map_drawings_zones_tankers_carrier():
 
     sim.click('Training Range/Refueling/Spawn Basket tanker')
     c = counts(sim)
-    check(c['line'] == 1 and c['circle'] == 6 and c['text'] == 8, f'basket track: {c}')
+    check(c['line'] == 2 and c['circle'] == 6 and c['text'] == 9, f'basket track: {c}')
     texts = list(sim.g.MOCK.markTexts().values())
     check(any('Basket tanker (KC135MPRS) | 251.000 AM | TACAN 51Y TKR' in t and '250 KIAS' in t for t in texts), f'{texts}')
     sim.click('Training Range/Refueling/Basket speed/310 KIAS')
     texts = list(sim.g.MOCK.markTexts().values())
-    check(counts(sim)['line'] == 1 and any('310 KIAS' in t for t in texts), 'speed change not redrawn in place')
+    check(counts(sim)['line'] == 2 and any('310 KIAS' in t for t in texts), 'speed change not redrawn in place')
     sim.click('Training Range/Refueling/Remove Basket tanker')
-    check(counts(sim)['line'] == 0, 'tanker track left on the map')
+    check(counts(sim)['line'] == 1, 'tanker track left on the map')
 
     sim.click('Training Range/Carrier Ops/Spawn S-3B Recovery Tanker')
-    check(counts(sim)['line'] == 1, 'S-3B track not drawn')
+    check(counts(sim)['line'] == 2, 'S-3B track not drawn')
     sim.run('MOCK.groups["TR_S3_TANKER"]:destroy()')  # shot down
     sim.run('local c = MOCK.units["TR_CARRIER"]; c.p.x = c.p.x + 3000')
     sim.advance(31)
-    check(counts(sim)['line'] == 0, 'track of a tanker that is gone still on the map')
+    check(counts(sim)['line'] == 1, 'track of a tanker that is gone still on the map')
     d = sim.ev('local c = MOCK.units["TR_CARRIER"]; for _, m in pairs(MOCK.marks) do '
                'if m.kind == "circle" and m.radius == 1852 then return MOCK.dist(m.center.x, m.center.z, c.p.x, c.p.z) end end')
     check(d is not None and d < 1, f'carrier ring did not follow the ship (off by {d})')
@@ -546,7 +818,7 @@ def map_drawings_zones_tankers_carrier():
     check(counts(sim)['line'] == 0, 'a tanker was drawn with the drawings off')
     sim.click('Training Range/Map drawings on/off')
     c = counts(sim)
-    check(c == {'quad': 3, 'circle': 6, 'line': 1, 'text': 8}, f'drawings after switching back on: {c}')
+    check(c == {'quad': 4, 'circle': 6, 'line': 2, 'text': 9}, f'drawings after switching back on: {c}')
     check(not sim.find('DUPLICATE ID'), 'two drawings shared an id')
 
 
@@ -555,9 +827,9 @@ def every_training_zone_is_on_the_map():
     sim = Sim().load(*SCRIPTS)
     sim.advance(2)
     c = counts(sim)
-    # range: 3 quads, 3 circles + the carrier ring; intercept: 1 quad, 4 circles;
-    # air combat: 3 quads; one name for each
-    check(c == {'quad': 7, 'circle': 8, 'line': 0, 'text': 15}, f'drawings with every script loaded: {c}')
+    # range: 3 quads + the strafe box, 3 circles + the carrier ring, the foul
+    # line; intercept: 1 quad, 4 circles; air combat: 3 quads; one name for each
+    check(c == {'quad': 8, 'circle': 8, 'line': 1, 'text': 16}, f'drawings with every script loaded: {c}')
     texts = list(sim.g.MOCK.markTexts().values())
     for t in ('Intercept: play box', 'Intercept: objective 3', 'Air combat: BVR mixed group', 'SEAD range: radar SAM'):
         check(t in texts, f'no "{t}" on the map')
@@ -814,7 +1086,7 @@ def smoke_every_command_twice_no_errors_no_new_globals():
     errs = sim.find('error')
     check(not errs, f'errors: {errs[:5]}')
     allowed = {'TR_Config', 'TR_Initialized', 'TR_Bombing', 'TR_Dogfight', 'TR_SEAD', 'TR_Carrier', 'TR_Refueling',
-               'TR_Markers', 'TRAINING_COMMS', 'INTERCEPT_Initialized', 'GCA_Initialized', 'AIRCOMBAT_Initialized',
+               'TR_Markers', 'TR_Strafe', 'TR_LSO', 'TRAINING_COMMS', 'INTERCEPT_Initialized', 'GCA_Initialized', 'AIRCOMBAT_Initialized',
                'JTAC_Initialized', 'COMMS_Initialized', 'CLICKED'}
     new = set(sim.ev('return NEWG').values()) - allowed
     check(not new, f'scripts created unexpected globals: {sorted(new)}')

@@ -82,7 +82,7 @@ coalition = { side = { NEUTRAL = 0, RED = 1, BLUE = 2 } }
 country = { id = { RUSSIA = 0, USA = 2 } }
 local COUNTRY_SIDE = { [0] = 1, [2] = 2 }
 Group = { Category = { AIRPLANE = 0, HELICOPTER = 1, GROUND = 2, SHIP = 3, TRAIN = 4 } }
-Unit = {}
+Unit = { Category = { AIRPLANE = 0, HELICOPTER = 1, GROUND_UNIT = 2, SHIP = 3, STRUCTURE = 4 } }
 
 local CtrlMT = {}; CtrlMT.__index = CtrlMT
 function CtrlMT:setTask(t) self.tasks[#self.tasks + 1] = t; log('[setTask]', self.owner, t.id) end
@@ -117,10 +117,19 @@ function UnitMT:getName() return self.name end
 function UnitMT:getID() return self.id end
 function UnitMT:isExist() return self.alive end
 function UnitMT:getPoint() return { x = self.p.x, y = self.p.y, z = self.p.z } end
+-- Orientation from the heading and the pitch (nose up positive), no roll.
 function UnitMT:getPosition()
-    local h = self.hdg or 0
-    return { p = self:getPoint(), x = { x = math.cos(h), y = 0, z = math.sin(h) },
-             y = { x = 0, y = 1, z = 0 }, z = { x = -math.sin(h), y = 0, z = math.cos(h) } }
+    local h, p = self.hdg or 0, self.pitch or 0
+    return { p = self:getPoint(),
+             x = { x = math.cos(h) * math.cos(p), y = math.sin(p), z = math.sin(h) * math.cos(p) },
+             y = { x = -math.cos(h) * math.sin(p), y = math.cos(p), z = -math.sin(h) * math.sin(p) },
+             z = { x = -math.sin(h), y = 0, z = math.cos(h) } }
+end
+-- Ammo as DCS gives it: { { count = n, desc = { category, typeName } }, ... }
+function UnitMT:getAmmo() return self.ammo end
+function UnitMT:getDesc()
+    local cat = ({ [0] = 0, [1] = 1, [3] = 3 })[self.group.category] or 2
+    return { category = cat, typeName = self.type }
 end
 function UnitMT:getVelocity()
     local v = self.v or { x = 0, y = 0, z = 0 }
@@ -155,15 +164,15 @@ function coalition.addGroup(cid, cat, data)
 end
 
 -- A client group placed in the Mission Editor (players): BLUE, one controller
--- per unit. Each spec: name, x, y (altitude), z, hdg (radians), air, player,
--- callsign, v = { x, y, z } (m/s).
-function MOCK.addClientGroup(gname, gid, list)
-    local g = setmetatable({ name = gname, id = gid, category = 0, side = 2, units = {} }, GroupMT)
+-- per unit. Each spec: name, x, y (altitude), z, hdg and pitch (radians), air,
+-- player, callsign, type, v = { x, y, z } (m/s), ammo. `cat` 1 = helicopters.
+function MOCK.addClientGroup(gname, gid, list, cat)
+    local g = setmetatable({ name = gname, id = gid, category = cat or 0, side = 2, units = {} }, GroupMT)
     g.ctrl = newCtrl(gname)
     for i, d in ipairs(list) do
         local u = setmetatable({ name = d.name, id = MOCK.nextUid, type = d.type or 'FA-18C_hornet', group = g,
-            alive = true, p = { x = d.x, y = d.y, z = d.z }, hdg = d.hdg or 0, air = (d.air ~= false),
-            player = d.player or d.name, callsign = d.callsign, v = d.v }, UnitMT)
+            alive = true, p = { x = d.x, y = d.y, z = d.z }, hdg = d.hdg or 0, pitch = d.pitch, air = (d.air ~= false),
+            player = d.player or d.name, callsign = d.callsign, v = d.v, ammo = d.ammo }, UnitMT)
         u.ctrl = newCtrl(d.name)
         MOCK.nextUid = MOCK.nextUid + 1
         g.units[i] = u
@@ -216,8 +225,9 @@ end
 
 -- ---------------------------------------------------------------- world
 world = { event = { S_EVENT_SHOT = 1, S_EVENT_HIT = 2, S_EVENT_TAKEOFF = 3, S_EVENT_LAND = 4,
-                    S_EVENT_CRASH = 5, S_EVENT_DEAD = 8, S_EVENT_BIRTH = 15, S_EVENT_KILL = 28,
-                    S_EVENT_UNIT_LOST = 30 } }
+                    S_EVENT_CRASH = 5, S_EVENT_DEAD = 8, S_EVENT_BIRTH = 15, S_EVENT_SHOOTING_START = 23,
+                    S_EVENT_SHOOTING_END = 24, S_EVENT_KILL = 28, S_EVENT_UNIT_LOST = 30,
+                    S_EVENT_LANDING_QUALITY_MARK = 36 } }
 function world.addEventHandler(h) MOCK.handlers[#MOCK.handlers + 1] = h end
 function world.getAirbases() return MOCK.airbases end
 function MOCK.fire(ev) for _, h in ipairs(MOCK.handlers) do h:onEvent(ev) end end

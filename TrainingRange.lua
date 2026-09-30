@@ -24,6 +24,7 @@
 --   TR_CARRIER        any         carrier strike group spawns at its centre at mission start
 --   TR_REFUEL_BASKET  ~60x15 km   basket tanker track (a Quad's long side sets the racetrack)
 --   TR_REFUEL_BOOM    ~60x15 km   boom tanker track, same
+--   TR_STRAFE         ~200 m      strafe pit targets at its centre (run-in heading in TR_Config)
 --
 -- A Quad is used with the shape drawn in the editor (its corners are read
 -- from the mission), a Circle with its radius. Every spawn location is a
@@ -47,6 +48,15 @@
 --
 -- HARM REACTION: a range SAM an anti-radiation missile comes at switches its
 -- radar off after a few seconds and back on after the missile has gone.
+--
+-- STRAFE PIT: a pass is flown through an approach box toward a row of
+-- targets; hits (S_EVENT_HIT) over rounds fired (from the ammo count) give
+-- the pass grade, and firing from inside the foul line voids it.
+--
+-- LSO: player approaches to the carrier are graded at the start, in the
+-- middle, in close and at the ramp (glideslope, line-up, angle of attack),
+-- with live calls, the wire caught, bolters and wave-offs, and a greenie
+-- board. With a Supercarrier, DCS's own LSO grade is relayed as well.
 --
 -- F10 MAP: range zones, tanker tracks with their radio and TACAN, the carrier
 -- and the S-3B track are drawn on the map for the player coalition.
@@ -85,6 +95,21 @@ TR_Config = {
         trackKm  = 30,   -- only weapons released within this distance of a bombing zone are followed
         rockets  = true,
         missiles = true, -- air-to-ground missiles (Maverick, Hellfire...), anti-radiation ones excluded
+    },
+    -- -----------------------------------------------------------------------
+    -- STRAFE PIT: a row of targets at the centre of the zone and an approach
+    -- box in front of them (MOOSE range defaults for box, foul line, grades)
+    -- -----------------------------------------------------------------------
+    strafe = {
+        zone      = "TR_STRAFE", -- ME zone (Circle or Quad), the targets stand at its centre
+        heading   = 360,         -- run-in heading toward the targets (map grid); a Quad's long side
+                                 -- overrides it, in the direction closest to this one
+        unit      = "T-90",      -- target type: armour takes cannon hits without dying at once
+        targets   = 3,           -- targets in a row across the run-in, 30 m apart (a dead one comes back)
+        boxLength = 3000,        -- approach box in front of the targets (metres)
+        boxWidth  = 300,
+        foulLine  = 610,         -- hits from closer than this do not count and foul the pass (2000 ft)
+        maxAgl    = 914,         -- a pass starts below this height (3000 ft)
     },
     -- -----------------------------------------------------------------------
     -- DOGFIGHT ZONE
@@ -163,6 +188,15 @@ TR_Config = {
             radio     = { mhz = 253.0, mod = 0 },
             tacan     = { channel = 53, mode = "Y", callsign = "RCV" },
         },
+        -- LSO: every player approach to the carrier is graded like a landing
+        -- signal officer does: glideslope, line-up and angle of attack at the
+        -- start, in the middle, in close and at the ramp, then the wire, a
+        -- bolter or a wave-off.
+        lso = {
+            enabled    = true,
+            glideslope = 3.5,  -- degrees, the lens setting
+            calls      = true, -- live calls in the groove: "Power", "Right for lineup", "Wave off"...
+        },
     },
     -- -----------------------------------------------------------------------
     -- REFUELING SERVICE
@@ -240,6 +274,11 @@ TR_Carrier   = TR_Carrier   or { spawned = false, recoveryTanker = nil, heading 
 TR_Refueling = TR_Refueling or { basket = nil, boom = nil, basketKias = nil, boomKias = nil,
                                  tracks = {} }    -- [which] = { wp1, wp2, label } of the tanker in service
 TR_Markers   = TR_Markers   or { on = nil, seq = 0, ids = {}, carrierAt = nil }
+TR_Strafe    = TR_Strafe    or { open = false, targets = {}, slots = {},     -- [unitName] = slot, [slot] = position
+                                 passes = {},                           -- [unitName] = pass in progress
+                                 stats = {} }                           -- [player] = { passes, hits, rounds, best, fouls }
+TR_LSO       = TR_LSO       or { passes = {},                           -- [unitName] = approach in progress
+                                 board = {} }                           -- [player] = { grades = {...}, points, n }
 
 -- Shared with the other training scripts: every asset that sets a radio,
 -- TACAN or ICLS writes itself here, and TRAINING_Comms.lua prints the list.
@@ -310,6 +349,12 @@ local function _msgToUnit(unit, msg, t)
 end
 
 local function _round(n) return math.floor(n + 0.5) end
+
+-- A heading as said on the radio: three digits, north is 360.
+local function _hdg3(deg)
+    local h = _round(deg) % 360
+    return string.format("%03d", (h == 0) and 360 or h)
+end
 
 local function _who(u)
     local ok, n = pcall(function() return u:getPlayerName() end)
@@ -952,6 +997,184 @@ local function _bombingReset()
 end
 
 -- ===========================================================================
+-- MODULE: STRAFE PIT
+-- ---------------------------------------------------------------------------
+-- A row of targets across the run-in at the centre of TR_STRAFE, and an
+-- approach box in front of them. A pass starts when a player is in the box,
+-- below 3000 ft and flying toward the pit, and ends when the player leaves
+-- it. Hits are the gun rounds that hit a pit target (S_EVENT_HIT), rounds
+-- fired the drop in the gun's ammo count over the pass. A hit scored from
+-- inside the foul line, or a burst that ends inside it, fouls the pass. The
+-- result comes two seconds after the pass, so the last rounds in flight
+-- count. Grades as the MOOSE range: DEADEYE from 90% of the rounds, EXCELLENT
+-- 75, GOOD 50, INEFFECTIVE 25, POOR below.
+-- ===========================================================================
+local function _strafeGeometry()
+    local c = TR_Config.strafe
+    local s = _zoneShape(c.zone); if not s then return nil end
+    local hdg = c.heading % 360
+    if s.poly then -- along the Quad's long side, in the direction closest to the configured one
+        local axis = _shapeAxis(s, c.heading)
+        hdg = (math.abs((axis - c.heading + 540) % 360 - 180) <= 90) and axis or (axis + 180) % 360
+    end
+    local r = math.rad(hdg)
+    return { x = s.cx, z = s.cz, hdg = hdg, fx = math.cos(r), fz = math.sin(r) } -- f: run-in direction
+end
+
+-- Gun rounds left (shells in the ammo list).
+local function _rounds(u)
+    local ok, ammo = pcall(function() return u:getAmmo() end)
+    local n = 0
+    for _, a in ipairs((ok and ammo) or {}) do
+        local d = a.desc or {}
+        if d.category == Weapon.Category.SHELL or tostring(d.typeName or ""):find("shell") then n = n + (a.count or 0) end
+    end
+    return n
+end
+
+local function _strafeSpawnOne(i)
+    local slot = TR_Strafe.slots and TR_Strafe.slots[i]
+    if not slot then return false end
+    local name = "TR_STRAFE_" .. i
+    if not _spawnGround(name, { TR_Config.strafe.unit }, slot, ENEMY_COUNTRY) then return false end
+    _setGroundWeaponHold(name) -- they never shoot back
+    TR_Strafe.targets[name .. "_1"] = i
+    return true
+end
+
+local function _strafeSpawn()
+    local c = TR_Config.strafe
+    local g = _strafeGeometry(); if not g then return false end
+    -- Forgotten before they are destroyed, so a despawn never triggers a respawn.
+    local old = TR_Strafe.targets
+    TR_Strafe.targets, TR_Strafe.slots, TR_Strafe.passes = {}, {}, {}
+    for name in pairs(old) do _destroyGroupByName((name:gsub("_1$", ""))) end
+    local placed = 0
+    for i = 1, c.targets do
+        local off = (i - (c.targets + 1) / 2) * 30 -- across the run-in
+        TR_Strafe.slots[i] = { x = g.x - g.fz * off, z = g.z + g.fx * off }
+        if _strafeSpawnOne(i) then placed = placed + 1 end
+    end
+    TR_Strafe.open = placed > 0
+    return TR_Strafe.open
+end
+
+local function _strafeReset()
+    if _strafeSpawn() then
+        _out(string.format("[Strafe pit] %d targets up, run-in %s, foul line %d ft.", #TR_Strafe.slots,
+             _hdg3(_strafeGeometry().hdg), _round(TR_Config.strafe.foulLine * 3.28084 / 100) * 100), 10)
+    else
+        _out("[Strafe pit] No pit: zone " .. TR_Config.strafe.zone .. " missing or spawn failed.", 12)
+    end
+end
+
+local function _strafeGrade(acc)
+    if acc >= 90 then return "DEADEYE PASS" end
+    if acc >= 75 then return "EXCELLENT PASS" end
+    if acc >= 50 then return "GOOD PASS" end
+    if acc >= 25 then return "INEFFECTIVE PASS" end
+    return "POOR PASS"
+end
+
+local function _strafeResult(name)
+    local pass = TR_Strafe.passes[name]
+    TR_Strafe.passes[name] = nil
+    local u = Unit.getByName(name)
+    if not (pass and u) then return end
+    if pass.t1 - pass.t0 < 3 then
+        _msgToUnit(u, "[Strafe pit] " .. pass.who .. ", left the box too quickly: no score.", 10)
+        return
+    end
+    local rounds = math.max(0, pass.rounds - _rounds(u))
+    if rounds == 0 and pass.hits == 0 then return end -- flew through without firing
+    local acc = (rounds > 0) and math.min(100, pass.hits / rounds * 100) or 0
+    local st = TR_Strafe.stats[pass.who] or { passes = 0, hits = 0, rounds = 0, fouls = 0 }
+    TR_Strafe.stats[pass.who] = st
+    local grade
+    if pass.foul then
+        grade = "* INVALID: fired inside the foul line *"
+        st.fouls = st.fouls + 1
+    else
+        grade = _strafeGrade(acc)
+        st.passes, st.hits, st.rounds = st.passes + 1, st.hits + pass.hits, st.rounds + rounds
+        if not st.best or acc > st.best then st.best = acc end
+    end
+    _msgToUnit(u, string.format("[Strafe pit] %s: %d hits of %d rounds, %d%%, %s", pass.who, pass.hits, rounds,
+        _round(acc), grade), 15)
+end
+
+-- Every half second: passes start in the box and end when the player leaves it.
+local function _strafeTick()
+    if not TR_Strafe.open then return end
+    local c = TR_Config.strafe
+    local g = _strafeGeometry(); if not g then return end
+    local now, seen = timer.getTime(), {}
+    for _, u in pairs(coalition.getPlayers(TR_Config.coalition) or {}) do
+        if u and u:isExist() then
+            local name = u:getName()
+            seen[name] = true
+            local p, v = u:getPoint(), u:getVelocity()
+            local dx, dz = p.x - g.x, p.z - g.z
+            local along = -(dx * g.fx + dz * g.fz) -- metres in front of the targets
+            local cross = -dx * g.fz + dz * g.fx
+            local inBox = u:inAir() and along > 0 and along <= c.boxLength and math.abs(cross) <= c.boxWidth / 2
+                          and (p.y - _groundY(p.x, p.z)) <= c.maxAgl and (v.x * g.fx + v.z * g.fz) > 0
+            local pass = TR_Strafe.passes[name]
+            if inBox and not pass then
+                local who = _who(u)
+                TR_Strafe.passes[name] = { who = who, t0 = now, rounds = _rounds(u), hits = 0, foul = false, active = true }
+                _msgToUnit(u, string.format("[Strafe pit] %s, rolling in. Cleared hot, foul line %d ft.", who,
+                    _round(c.foulLine * 3.28084 / 100) * 100), 8)
+            elseif pass and pass.active and not inBox then
+                pass.active, pass.t1 = false, now
+                timer.scheduleFunction(function() pcall(_strafeResult, name); return nil end, nil, now + 2)
+            end
+        end
+    end
+    for name, pass in pairs(TR_Strafe.passes) do
+        if pass.active and not seen[name] then TR_Strafe.passes[name] = nil end
+    end
+end
+
+local function _strafeFoul(u, pass, why)
+    if pass.foul then return end
+    pass.foul = true
+    _msgToUnit(u, string.format("[Strafe pit] %s, FOUL LINE: %s inside %d ft, the pass does not count.", pass.who,
+        why, _round(TR_Config.strafe.foulLine * 3.28084 / 100) * 100), 10)
+end
+
+-- A gun round from a player in a pass that hits a pit target.
+local function _strafeHit(event)
+    local ini, tgt = event.initiator, event.target
+    if not (ini and tgt and ini.getName and tgt.getName) then return end
+    local pass = TR_Strafe.passes[ini:getName()]
+    local okt, tname = pcall(function() return tgt:getName() end)
+    if not (pass and okt and TR_Strafe.targets[tname]) then return end
+    local w = event.weapon
+    if w and w.getDesc then -- a bomb or a rocket on the pit is not strafing
+        local okd, d = pcall(function() return w:getDesc() end)
+        if okd and d and d.category and d.category ~= Weapon.Category.SHELL then return end
+    end
+    if _dist2D(ini:getPoint(), tgt:getPoint()) < TR_Config.strafe.foulLine then
+        _strafeFoul(ini, pass, "hits from")
+    else
+        pass.hits = pass.hits + 1
+    end
+end
+
+-- A burst that ends inside the foul line fouls the pass even without hits.
+local function _strafeShootingEnd(event)
+    local u = event.initiator
+    if not (u and u.getName) then return end
+    local pass = TR_Strafe.passes[u:getName()]
+    if not (pass and pass.active) then return end
+    local g = _strafeGeometry()
+    if g and _dist2D(u:getPoint(), { x = g.x, z = g.z }) < TR_Config.strafe.foulLine then
+        _strafeFoul(u, pass, "firing")
+    end
+end
+
+-- ===========================================================================
 -- MODULE: DOGFIGHT ZONE  (automatic, no menu, players just fly in)
 -- ===========================================================================
 local function _dogfightTick()
@@ -1585,21 +1808,36 @@ local function _scoreShot(event, w, s, desc)
 end
 
 local function _scoreBoard()
-    local rows = {}
+    local rows, srows = {}, {}
     for who, s in pairs(TR_Bombing.scores) do rows[#rows + 1] = { who = who, s = s, avg = s.sum / s.n } end
-    if #rows == 0 then _out("[Bombing Range] No scored impacts yet.", 10); return end
-    table.sort(rows, function(a, b) return a.avg < b.avg end)
-    local lines = { "[Bombing Range] Scores, average distance from the target:" }
-    for i, r in ipairs(rows) do
-        lines[#lines + 1] = string.format("%d. %s: %d weapon(s), average %d m, best %d m (%s)%s", i, r.who, r.s.n,
-            _round(r.avg), _round(r.s.best), r.s.bestQ, (r.s.shacks > 0) and (", " .. r.s.shacks .. " shack(s)") or "")
+    for who, s in pairs(TR_Strafe.stats) do
+        srows[#srows + 1] = { who = who, s = s, acc = (s.rounds > 0) and (s.hits / s.rounds * 100) or 0 }
+    end
+    if #rows == 0 and #srows == 0 then _out("[Bombing Range] No scores yet.", 10); return end
+    local lines = {}
+    if #rows > 0 then
+        table.sort(rows, function(a, b) return a.avg < b.avg end)
+        lines[#lines + 1] = "[Bombing Range] Bombs, average distance from the target:"
+        for i, r in ipairs(rows) do
+            lines[#lines + 1] = string.format("%d. %s: %d weapon(s), average %d m, best %d m (%s)%s", i, r.who, r.s.n,
+                _round(r.avg), _round(r.s.best), r.s.bestQ, (r.s.shacks > 0) and (", " .. r.s.shacks .. " shack(s)") or "")
+        end
+    end
+    if #srows > 0 then
+        table.sort(srows, function(a, b) return a.acc > b.acc end)
+        lines[#lines + 1] = "[Strafe pit] Hits per round fired, valid passes:"
+        for i, r in ipairs(srows) do
+            lines[#lines + 1] = string.format("%d. %s: %d pass(es), %d hits of %d rounds (%d%%)%s%s", i, r.who,
+                r.s.passes, r.s.hits, r.s.rounds, _round(r.acc), r.s.best and string.format(", best pass %d%%", _round(r.s.best)) or "",
+                (r.s.fouls > 0) and (", " .. r.s.fouls .. " foul(s)") or "")
+        end
     end
     _out(table.concat(lines, "\n"), 25)
 end
 
 local function _scoreClear()
-    TR_Bombing.scores = {}
-    _out("[Bombing Range] Scores cleared.", 8)
+    TR_Bombing.scores, TR_Strafe.stats = {}, {}
+    _out("[Bombing Range] Scores cleared (bombs and strafe pit).", 8)
 end
 
 -- One S_EVENT_SHOT, three independent users: an error in one does not stop
@@ -1993,6 +2231,316 @@ local function _carrierRespawn()
     _carrierSpawn() -- back on station at the zone (and on the map)
 end
 
+-- ---------------------------------------------------------------------------
+-- LSO: landing grades.
+-- The landing area is laid out from the ship's reference point with the deck
+-- measurements the MOOSE Airboss authors took in DCS (stern and ramp offset,
+-- wires, deck height, angle of the landing area) for the three US carrier
+-- models; the rest is computed here. Errors are angles, as the lens shows
+-- them: glideslope error = elevation above the optimum glide path to the
+-- 3-wire, line-up error = angle off the landing-area centreline seen from the
+-- same point (positive = lined up left). Positions in the groove: start (X)
+-- 3/4 NM from the ramp, in the middle 1/2, in close 1/4, at the ramp 75 m;
+-- each keeps the worst error until the next. Thresholds, AoA bands and the
+-- grading rule are the Airboss ones (NATOPS based); the wire comes from where
+-- the aircraft stops, about 100 m past the wire it caught.
+-- ---------------------------------------------------------------------------
+local DECKS = {
+    { match = "^Stennis$",   stern = -153,   ramp = 7,   deck = 18.30, angle = 9.1359, length = 310,   wires = { 46, 58, 70, 81 } },
+    { match = "^CVN_7%d$",   stern = -164,   ramp = 9.5, deck = 20.15, angle = 9.1359, length = 332.8, wires = { 55, 67, 79, 96 } },
+    { match = "^Forrestal$", stern = -135.5, ramp = 7.5, deck = 20,    angle = 9.1359, length = 315,   wires = { 44, 54, 64, 74 } },
+}
+
+-- On-speed angle of attack and its bands, degrees (the F-14's units converted
+-- with Heatblur's 15 units = 10.36 degrees). Other types get no speed comments.
+local AOA_BANDS = {
+    hornet = { SLOW = 9.8,   Slow = 9.3,   OnMax = 8.8,   On = 8.1,   OnMin = 7.4,  Fast = 6.9,  FAST = 6.3 },
+    tomcat = { SLOW = 12.65, Slow = 11.74, OnMax = 11.28, On = 10.36, OnMin = 9.44, Fast = 8.98, FAST = 8.06 },
+}
+local function _aoaBands(typeName)
+    if typeName == "FA-18C_hornet" then return AOA_BANDS.hornet end
+    if typeName:find("^F%-14") then return AOA_BANDS.tomcat end
+    return nil
+end
+
+-- Arrested landings only: airplanes, not helicopters, and not the Harrier,
+-- which lands vertically beside the landing area.
+local function _hooked(u)
+    local ok, d = pcall(function() return u:getDesc() end)
+    if ok and d and d.category and Unit.Category and d.category ~= Unit.Category.AIRPLANE then return false end
+    return not tostring(u:getTypeName() or ""):find("^AV8B")
+end
+
+local GROOVE = { { "X", 0.75 * NM_M }, { "IM", 0.5 * NM_M }, { "IC", 0.25 * NM_M }, { "AR", 75 } }
+local POINTS = { OK = 4, ["(OK)"] = 3, ["--"] = 2, B = 2.5, OWO = 2, WO = 1, CUT = 0 }
+
+-- The landing area now: stern (ramp) point, optimum touchdown point, axes.
+local function _lsoFrame()
+    local c = TR_Config.carrier
+    local ship = Unit.getByName(c.unitName)
+    if not ship then return nil end
+    local tn, deck = ship:getTypeName() or "", nil
+    for _, d in ipairs(DECKS) do
+        if tn:find(d.match) then deck = d break end
+    end
+    if not deck then return nil end
+    local pos = ship:getPosition()
+    local h = math.atan2(pos.x.z, pos.x.x)       -- ship heading
+    local fb = h - math.rad(deck.angle)          -- the landing area points this much to port
+    local cp = pos.p
+    local sx = cp.x + math.cos(h) * deck.stern + math.cos(fb + math.pi / 2) * deck.ramp
+    local sz = cp.z + math.sin(h) * deck.stern + math.sin(fb + math.pi / 2) * deck.ramp
+    local w3 = deck.wires[3]
+    return { ship = ship, deck = deck, cp = cp, h = h, fb = fb, s = { x = sx, z = sz },
+             l = { x = sx + math.cos(fb) * w3, y = deck.deck + 2, z = sz + math.sin(fb) * w3 },
+             v = ship:getVelocity() }
+end
+
+local function _lsoMeasure(f, u)
+    local p = u:getPoint()
+    local X = (p.x - f.cp.x) * math.cos(f.h) + (p.z - f.cp.z) * math.sin(f.h) -- along the ship
+    local rho = math.sqrt((p.x - f.s.x) ^ 2 + (p.z - f.s.z) ^ 2)
+    if X > f.deck.stern then rho = -rho end                                  -- past the ramp
+    local lx, lz = f.l.x - p.x, f.l.z - p.z
+    local gse = math.deg(math.atan2(p.y - f.l.y, math.sqrt(lx * lx + lz * lz))) - TR_Config.carrier.lso.glideslope
+    local lue = math.deg(math.atan2(-lx * math.sin(f.fb) + lz * math.cos(f.fb), lx * math.cos(f.fb) + lz * math.sin(f.fb)))
+    -- Angle of attack: the air-relative velocity in the aircraft's own axes.
+    local v, w, o = u:getVelocity(), atmosphere.getWind(p), u:getPosition()
+    local ax, ay, az = v.x - w.x, v.y - (w.y or 0), v.z - w.z
+    local bx = ax * o.x.x + ay * o.x.y + az * o.x.z
+    local by = ax * o.y.x + ay * o.y.y + az * o.y.z
+    -- closing = moving up the landing area faster than the ship
+    local closing = (v.x - f.v.x) * math.cos(f.fb) + (v.z - f.v.z) * math.sin(f.fb)
+    return { X = X, rho = rho, gse = gse, lue = lue, aoa = math.deg(math.atan2(-by, bx)), h = p.y - f.deck.deck,
+             closing = closing }
+end
+
+-- "(LO)" small, "LO" normal, "_LO_" large: the LSO's shorthand.
+local function _dev(v, small, normal, large, text)
+    if v > large then return "_" .. text .. "_", "L" end
+    if v > normal then return text, "N" end
+    if v > small then return "(" .. text .. ")", "S" end
+    return nil
+end
+
+local function _lsoComment(d, bands, pos)
+    local parts, sizes = {}, {}
+    local function add(t, s) if t then parts[#parts + 1] = t; sizes[#sizes + 1] = s end end
+    if bands then
+        add(_dev(d.aoa - bands.On, bands.OnMax - bands.On, bands.Slow - bands.On, bands.SLOW - bands.On, "SLO"))
+        add(_dev(bands.On - d.aoa, bands.On - bands.OnMin, bands.On - bands.Fast, bands.On - bands.FAST, "F"))
+    end
+    add(_dev(d.gse, 0.4, 0.8, 1.5, "H"))
+    add(_dev(-d.gse, 0.3, 0.6, 0.9, "LO"))
+    add(_dev(d.lue, 1.8, 2.8, 4.5, "LUL"))
+    add(_dev(-d.lue, 1.8, 2.8, 4.5, "LUR"))
+    if #parts == 0 then return "", sizes end
+    return table.concat(parts) .. pos, sizes
+end
+
+local function _lsoCall(u, text)
+    pcall(function() trigger.action.outTextForUnit(u:getID(), "[LSO] " .. text, 3, true) end)
+end
+
+-- Grade, like the Airboss: a large deviation anywhere is no grade, a normal
+-- one a fair pass; wave-offs, bolters and own wave-offs have their own marks.
+local function _lsoFinish(u, name, ps, result, wire)
+    TR_LSO.passes[name] = nil
+    if not ps.data.X then return end -- never reached the start of the groove: nothing to grade
+    local comments, nL, nN = {}, 0, 0
+    for _, g in ipairs(GROOVE) do
+        local d = ps.data[g[1]]
+        if d then
+            local text, sizes = _lsoComment(d, ps.bands, g[1])
+            if text ~= "" then comments[#comments + 1] = text end
+            for _, s in ipairs(sizes) do
+                if s == "L" then nL = nL + 1 elseif s == "N" then nN = nN + 1 end
+            end
+        end
+    end
+    local grade
+    if result == "TRAP" then
+        grade = (nL > 0 and "--") or (nN > 0 and "(OK)") or "OK"
+    else
+        grade = result -- B, WO, OWO, CUT
+    end
+    local label = ({ B = "-- (BOLTER)", WO = "WO (waved off)", OWO = "OWO (own wave-off)", CUT = "CUT (landed after a wave-off)" })[grade] or grade
+    local parts = { string.format("[LSO] %s: %s", ps.who, label) }
+    if result == "TRAP" then parts[#parts + 1] = wire and (wire .. "-wire") or "no wire" end
+    local tail = (#comments > 0) and table.concat(comments, " ") or "no deviations"
+    if ps.why then tail = tail .. " | " .. ps.why end
+    local text = table.concat(parts, ", ") .. ". " .. tail
+    local b = TR_LSO.board[ps.who] or { grades = {}, points = 0, n = 0 }
+    TR_LSO.board[ps.who] = b
+    b.grades[#b.grades + 1] = grade
+    b.points, b.n = b.points + (POINTS[grade] or 0), b.n + 1
+    if u then _msgToUnit(u, text, 30) end
+end
+
+-- After a touchdown: wait until the aircraft stops (trap) or goes past the
+-- bow (bolter). The landing event can come late for players, so the tick's
+-- own touchdown check starts this too.
+local function _lsoTrapWatch(name, ps)
+    if ps.trapping then return end
+    ps.trapping, ps.tTouch = true, timer.getTime()
+    timer.scheduleFunction(function(_, t)
+        local ok, nxt = pcall(function()
+            local u = Unit.getByName(name)
+            local f = _lsoFrame()
+            if not (u and f) or TR_LSO.passes[name] ~= ps then TR_LSO.passes[name] = nil; return nil end
+            local m = _lsoMeasure(f, u)
+            if m.X > f.deck.stern + f.deck.length then _lsoFinish(u, name, ps, "B"); return nil end
+            local v = u:getVelocity()
+            local rel = math.sqrt((v.x - f.v.x) ^ 2 + (v.z - f.v.z) ^ 2)
+            if rel < 1.5 and not u:inAir() then
+                local w = f.deck.wires
+                local d = math.abs(m.rho) - 100
+                local wire = (d < w[1] and 1) or (d < w[2] and 2) or (d < w[3] and 3) or (d < w[4] + 10 and 4) or nil
+                _lsoFinish(u, name, ps, ps.waveoff and "CUT" or "TRAP", wire)
+                return nil
+            end
+            if t - ps.tTouch > 30 then TR_LSO.passes[name] = nil; return nil end
+            return t + 0.2
+        end)
+        if not ok then env.info("[Training Range] LSO trap watch error: " .. tostring(nxt)); return nil end
+        return nxt
+    end, nil, timer.getTime() + 0.2)
+end
+
+local function _lsoTrack(f, u, name, ps, m)
+    local L = TR_Config.carrier.lso
+    local now = timer.getTime()
+    -- Touchdown on the deck (the tick sees it before the landing event does).
+    if not u:inAir() and m.X > f.deck.stern - 10 and m.X < f.deck.stern + f.deck.length then
+        _lsoTrapWatch(name, ps)
+        return
+    end
+    -- Positions in the groove; each new one starts its record.
+    for i = (ps.step or 0) + 1, #GROOVE do
+        if m.rho > GROOVE[i][2] then break end
+        ps.step = i
+        ps.data[GROOVE[i][1]] = { gse = m.gse, lue = m.lue, aoa = m.aoa }
+        if i == 1 then
+            if L.calls then _lsoCall(u, ps.who .. ", roger ball.") end
+            ps.lastCall = now
+        end
+    end
+    local cur = ps.step and ps.data[GROOVE[ps.step][1]]
+    if cur and m.rho > 0 then
+        if math.abs(m.gse) > math.abs(cur.gse) then cur.gse = m.gse end
+        if math.abs(m.lue) > math.abs(cur.lue) then cur.lue = m.lue end
+        if ps.bands and math.abs(m.aoa - ps.bands.On) > math.abs(cur.aoa - ps.bands.On) then cur.aoa = m.aoa end
+    end
+    -- Wave-off window: in close to the ramp.
+    if ps.step and not ps.waveoff and m.rho <= GROOVE[3][2] and m.rho >= GROOVE[4][2] then
+        local why
+        if m.gse > 1.8 then why = string.format("too high (%.1f deg)", m.gse)
+        elseif m.gse < -1.2 then why = string.format("too low (%.1f deg)", m.gse)
+        elseif math.abs(m.lue) > 3 then why = string.format("lined up %s (%.1f deg)", m.lue > 0 and "left" or "right", math.abs(m.lue)) end
+        if why then
+            ps.waveoff, ps.why = true, "waved off: " .. why
+            _lsoCall(u, "WAVE OFF, WAVE OFF!")
+            ps.lastCall = now
+        end
+    end
+    -- Live calls, at most one every 2.5 s, each replacing the previous.
+    if L.calls and ps.step and not ps.waveoff and m.rho > GROOVE[4][2] and now - (ps.lastCall or 0) >= 2.5 then
+        local calls = {}
+        if m.gse > 1.5 then calls[#calls + 1] = "YOU'RE HIGH!" elseif m.gse > 0.8 then calls[#calls + 1] = "You're high."
+        elseif m.gse < -0.9 then calls[#calls + 1] = "POWER!" elseif m.gse < -0.6 then calls[#calls + 1] = "Power." end
+        if m.lue > 4.5 then calls[#calls + 1] = "RIGHT FOR LINEUP!" elseif m.lue > 2.8 then calls[#calls + 1] = "Right for lineup."
+        elseif m.lue < -4.5 then calls[#calls + 1] = "COME LEFT!" elseif m.lue < -2.8 then calls[#calls + 1] = "Come left." end
+        if ps.bands then
+            if m.aoa > ps.bands.SLOW then calls[#calls + 1] = "YOU'RE SLOW!" elseif m.aoa > ps.bands.Slow then calls[#calls + 1] = "You're slow."
+            elseif m.aoa < ps.bands.FAST then calls[#calls + 1] = "YOU'RE FAST!" elseif m.aoa < ps.bands.Fast then calls[#calls + 1] = "You're fast." end
+        end
+        if #calls > 0 then
+            _lsoCall(u, table.concat(calls, " "))
+            ps.lastCall = now
+        end
+    end
+    -- End in the air: past the bow, or out of the groove.
+    if m.X > f.deck.stern + f.deck.length then
+        _lsoFinish(u, name, ps, ps.waveoff and "WO" or "OWO")
+    elseif m.rho > 1.3 * NM_M or m.h > 450 or math.abs(m.lue) > 20 or m.closing < 0 then
+        if ps.step then _lsoFinish(u, name, ps, ps.waveoff and "WO" or "OWO")
+        else TR_LSO.passes[name] = nil end
+    end
+end
+
+-- Every 0.2 s while someone is near the carrier's stern, every second otherwise.
+local function _lsoTick()
+    local L = TR_Config.carrier.lso
+    if not L.enabled then return 1 end
+    local f = _lsoFrame()
+    if not f then TR_LSO.passes = {}; return 1 end
+    local busy, seen = false, {}
+    for _, u in pairs(coalition.getPlayers(TR_Config.coalition) or {}) do
+        if u and u:isExist() then
+            local name = u:getName()
+            seen[name] = true
+            local ps = TR_LSO.passes[name]
+            if ps and ps.trapping then
+                busy = true
+            else
+                local m = _lsoMeasure(f, u)
+                if not ps and u:inAir() and m.rho > GROOVE[4][2] and m.rho <= NM_M and math.abs(m.lue) <= 8
+                   and m.h < 250 and m.closing > 0 and _hooked(u) then
+                    ps = { who = _who(u), data = {}, bands = _aoaBands(u:getTypeName() or "") }
+                    TR_LSO.passes[name] = ps
+                end
+                if ps then
+                    busy = true
+                    _lsoTrack(f, u, name, ps, m)
+                elseif m.rho > 0 and m.rho < 3 * NM_M then
+                    busy = true
+                end
+            end
+        end
+    end
+    for name in pairs(TR_LSO.passes) do
+        if not seen[name] then TR_LSO.passes[name] = nil end
+    end
+    return busy and 0.2 or 1
+end
+
+-- The landing event also starts the trap watch (for a touchdown between ticks).
+local function _lsoOnLand(event)
+    local u = event.initiator
+    if not (u and u.getName) then return end
+    local name = u:getName()
+    local ps = TR_LSO.passes[name]
+    if ps and not ps.trapping then _lsoTrapWatch(name, ps) end
+end
+
+-- DCS's own LSO (Supercarrier) grades the landing too: pass it on as it is.
+local function _lsoNative(event)
+    local u, comment = event.initiator, event.comment
+    if not (u and u.getName and comment and comment ~= "") then return end
+    if not TR_Config.carrier.lso.enabled then return end
+    _msgToUnit(u, "[LSO] DCS: " .. tostring(comment), 30)
+end
+
+local function _lsoBoard()
+    local rows = {}
+    for who, b in pairs(TR_LSO.board) do rows[#rows + 1] = { who = who, b = b, avg = b.points / b.n } end
+    if #rows == 0 then _out("[LSO] No passes graded yet.", 10); return end
+    table.sort(rows, function(a, b) return a.avg > b.avg end)
+    local lines = { "[LSO] Greenie board (points: OK 4, (OK) 3, bolter 2.5, -- 2, OWO 2, WO 1, CUT 0):" }
+    for i, r in ipairs(rows) do
+        local last, g = {}, r.b.grades
+        for k = math.max(1, #g - 9), #g do last[#last + 1] = g[k] end
+        lines[#lines + 1] = string.format("%d. %s: %.2f over %d pass(es) | %s", i, r.who, r.avg, r.b.n, table.concat(last, "  "))
+    end
+    _out(table.concat(lines, "\n"), 30)
+end
+
+local function _lsoToggleCalls()
+    local L = TR_Config.carrier.lso
+    L.calls = not L.calls
+    _out("[LSO] Live calls in the groove " .. (L.calls and "ON." or "OFF (grades only)."), 8)
+end
+
 -- ===========================================================================
 -- MODULE: REFUELING SERVICE
 -- ===========================================================================
@@ -2107,6 +2655,22 @@ local function _markZones()
     _markZone("zones", TR_Config.dogfight.zone, "Dogfight arena (players)", C.dogfight)
     _markZone("zones", s.radarZone, "SEAD range: radar SAM", C.sead)
     _markZone("zones", s.irZone,    "SEAD range: IR / AAA",  C.sead)
+    -- The strafe pit: its approach box, the foul line across it, the run-in.
+    local g, st = _strafeGeometry(), TR_Config.strafe
+    if g then
+        local rx, rz, hw = -g.fz, g.fx, st.boxWidth / 2
+        local bx, bz = g.x - g.fx * st.boxLength, g.z - g.fz * st.boxLength
+        local fx, fz = g.x - g.fx * st.foulLine, g.z - g.fz * st.foulLine
+        local id = _markNew("zones")
+        pcall(function() trigger.action.quadToAll(TR_Config.coalition, id, _v3(g.x + rx * hw, g.z + rz * hw),
+            _v3(bx + rx * hw, bz + rz * hw), _v3(bx - rx * hw, bz - rz * hw), _v3(g.x - rx * hw, g.z - rz * hw),
+            C.bombing, _alpha(C.bombing, 0.08), 1, true, "") end)
+        id = _markNew("zones")
+        pcall(function() trigger.action.lineToAll(TR_Config.coalition, id, _v3(fx + rx * hw, fz + rz * hw),
+            _v3(fx - rx * hw, fz - rz * hw), C.dogfight, 1, true, "") end)
+        _markText("zones", bx + rx * (hw + 600), bz + rz * (hw + 600), string.format("Strafe pit: run-in %s, foul line %d ft",
+            _hdg3(g.hdg), _round(st.foulLine * 3.28084 / 100) * 100), C.bombing)
+    end
 end
 
 local function _markAll()
@@ -2169,6 +2733,7 @@ end
 -- put back if it is missing. "Respawn carrier" in Carrier Ops does the rest.
 local function _resetAll()
     _bombingReset()
+    _strafeReset()
     _seadReset()
     _dogfightReset()
     _refuelReset()
@@ -2187,6 +2752,16 @@ local function _onUnitGone(event)
     if not u or not u.getName then return end
     local okn, uname = pcall(function() return u:getName() end)
     if not okn or not uname then return end
+    -- A strafe pit target comes back ten seconds after it dies.
+    local si = TR_Strafe.targets[uname]
+    if si then
+        TR_Strafe.targets[uname] = nil -- once, whatever events follow
+        timer.scheduleFunction(function()
+            if TR_Strafe.open and TR_Strafe.slots[si] then pcall(_strafeSpawnOne, si) end
+            return nil
+        end, nil, timer.getTime() + 10)
+        return
+    end
     local gname = TR_Bombing.unitGroup[uname]
     if not gname or TR_Bombing.counted[uname] or not TR_Bombing.targets[gname] then return end
     TR_Bombing.counted[uname] = true
@@ -2217,12 +2792,20 @@ function _eventHandler:onEvent(event)
     local ok, err = pcall(function()
         if not event then return end
         local id = event.id
-        if id == world.event.S_EVENT_DEAD or (world.event.S_EVENT_UNIT_LOST and id == world.event.S_EVENT_UNIT_LOST) then
+        local E = world.event
+        if id == E.S_EVENT_DEAD or (E.S_EVENT_UNIT_LOST and id == E.S_EVENT_UNIT_LOST) then
             _onUnitGone(event)
-        elseif id == world.event.S_EVENT_HIT then
+        elseif id == E.S_EVENT_HIT then
             _onHit(event)
-        elseif id == world.event.S_EVENT_SHOT then
+            _strafeHit(event)
+        elseif id == E.S_EVENT_SHOT then
             _onShot(event)
+        elseif E.S_EVENT_SHOOTING_END and id == E.S_EVENT_SHOOTING_END then
+            _strafeShootingEnd(event)
+        elseif id == E.S_EVENT_LAND then
+            _lsoOnLand(event)
+        elseif E.S_EVENT_LANDING_QUALITY_MARK and id == E.S_EVENT_LANDING_QUALITY_MARK then
+            _lsoNative(event)
         end
     end)
     if not ok then env.info("[Training Range] onEvent error: " .. tostring(err)) end
@@ -2246,6 +2829,7 @@ local function _buildMenu()
         end
     end
     _cmd("Spawn convoy",        mB, function() _bombingSpawnConvoy() end)
+    _cmd("Respawn strafe pit",  mB, function() _strafeReset() end)
     _cmd("Scores",              mB, function() _scoreBoard() end)
     _cmd("Clear scores",        mB, function() _scoreClear() end)
     _cmd("Reset Bombing Range", mB, function() _bombingReset() end)
@@ -2281,6 +2865,9 @@ local function _buildMenu()
     _cmd("Defend only (return fire)", mCr, function() _carrierSetROE("defend") end)
     _cmd("Call recovery (into wind)",  mC, function() _carrierRecovery() end)
     _cmd("Deck status",                mC, function() _carrierDeckStatus() end)
+    _cmd("LSO grades (greenie board)", mC, function() _lsoBoard() end)
+    _cmd("LSO live calls on/off",      mC, function() _lsoToggleCalls() end)
+    _cmd("Clear LSO grades",           mC, function() TR_LSO.board = {}; _out("[LSO] Greenie board cleared.", 8) end)
     _cmd("Spawn S-3B Recovery Tanker", mC, function() _carrierTanker() end)
     _cmd("Remove S-3B",                mC, function() _carrierRemoveTanker() end)
     _cmd("Respawn carrier",            mC, function() _carrierRespawn() end)
@@ -2311,7 +2898,7 @@ local function _checkZones()
     local b, s, c, r = TR_Config.bombing, TR_Config.sead, TR_Config.carrier, TR_Config.refueling
     local missing = {}
     for _, zn in ipairs({ b.zone, b.lightZone, b.heavyZone, TR_Config.dogfight.zone, s.radarZone, s.irZone,
-                          c.zone, r.basket.zone, r.boom.zone }) do
+                          c.zone, r.basket.zone, r.boom.zone, TR_Config.strafe.zone }) do
         if not _zoneShape(zn) then missing[#missing + 1] = zn end
     end
     if #missing > 0 then
@@ -2341,11 +2928,23 @@ if not TR_Initialized then
         nil, timer.getTime() + 60)
     timer.scheduleFunction(function(_, time) pcall(_markTick); return time + 30 end,
         nil, timer.getTime() + 30)
+    timer.scheduleFunction(function(_, time) pcall(_strafeTick); return time + 0.5 end,
+        nil, timer.getTime() + 2)
+    timer.scheduleFunction(function(_, time)
+        local ok, dt = pcall(_lsoTick)
+        if not ok then env.info("[Training Range] LSO tick error: " .. tostring(dt)) end
+        return time + ((ok and dt) or 1)
+    end, nil, timer.getTime() + 2)
 
-    -- The carrier strike group is on station from mission start. Small delay so
-    -- the mission is fully loaded before the ship group spawns; the range zones
-    -- go on the map with it.
-    timer.scheduleFunction(function() pcall(_carrierSpawn); pcall(_markZones); return nil end, nil, timer.getTime() + 1.0)
+    -- The carrier strike group is on station from mission start, and so is the
+    -- strafe pit. Small delay so the mission is fully loaded before they spawn;
+    -- the range zones go on the map with them.
+    timer.scheduleFunction(function()
+        pcall(_carrierSpawn)
+        pcall(_strafeSpawn)
+        pcall(_markZones)
+        return nil
+    end, nil, timer.getTime() + 1.0)
 
     _out("[Training Range] Ready. Open the F10 radio menu -> Training Range.", 15)
 end

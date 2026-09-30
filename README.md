@@ -6,7 +6,7 @@ or all of them, in any order.
 
 | Script | What it does |
 |---|---|
-| [`TrainingRange.lua`](TrainingRange.lua) | F10 range: bombing (with impact scores), dogfight (missile protection + scoring), SEAD (radar + IR/AAA presets, missile protection, SAMs that go dark for a HARM), carrier ops, air-to-air refuelling, range drawn on the F10 map |
+| [`TrainingRange.lua`](TrainingRange.lua) | F10 range: bombing (with impact scores), strafe pit, dogfight (missile protection + scoring), SEAD (radar + IR/AAA presets, missile protection, SAMs that go dark for a HARM), carrier ops with LSO landing grades, air-to-air refuelling, range drawn on the F10 map |
 | [`TRAINING_Intercept.lua`](TRAINING_Intercept.lua) | Scramble-intercept trainer with a radio menu, random target launch, failure when the target reaches its objective or leaves the box, Bogey dope (BRAA) on request |
 | [`TRAINING_GCA.lua`](TRAINING_GCA.lua) | Text Ground Controlled Approach (PAR talkdown), runway read from the airfield under the zone |
 | [`TRAINING_AirCombat.lua`](TRAINING_AirCombat.lua) | Air-to-air arenas vs RED: dogfight, BVR, and a mixed group that scales to player count |
@@ -54,6 +54,7 @@ extra step. `TRAINING_Comms.lua` lists them all in flight.
 | `TR_CARRIER` | Carrier strike group spawns at its centre at mission start | any |
 | `TR_REFUEL_BASKET` | Basket tanker track (a Quad's long side sets the racetrack) | Quad ~60 x 15 km |
 | `TR_REFUEL_BOOM` | Boom tanker track, same | Quad ~60 x 15 km |
+| `TR_STRAFE` | Strafe pit: the targets stand at its centre, the run-in heading is in `TR_Config.strafe` (a Quad's long side sets it) | ~200 m |
 
 * **Carrier:** on station from mission start as a full group (carrier plus a cruiser, two
   destroyers and a plane-guard frigate) steaming out and back through its zone, sea room
@@ -67,6 +68,18 @@ extra step. `TRAINING_Comms.lua` lists them all in flight.
   allows. Speed is selectable in indicated airspeed (220 to 310 KIAS) from the Refueling menu.
 * **S-3B recovery tanker:** `253.000 AM / 53Y RCV`, 6000 ft, a racetrack 2 NM on the carrier's
   port side that moves with the carrier.
+* **LSO landing grades:** every player approach to the carrier is graded as a landing signal officer
+  does. Glideslope (3.5 degrees to the 3-wire), line-up and angle of attack are checked at the start
+  (3/4 NM), in the middle, in close and at the ramp, in the LSO shorthand: `(LO)` a little low, `LO`
+  low, `_LO_` well low, likewise `H`, `LUL`/`LUR`, `F`/`SLO`. The grade follows the MOOSE Airboss rule:
+  `OK` with at most small deviations, `(OK)` with a normal one, `--` with a large one; `-- (BOLTER)`,
+  `WO` (waved off: more than 1.8 degrees high, 1.2 low or 3 off the centreline in close), `OWO` (own
+  wave-off), `CUT` (landed after a wave-off). The wire comes from where the aircraft stops. Live calls
+  in the groove ("Roger ball", "Power", "Right for lineup", "You're slow", "Wave off") can be switched
+  off; **LSO grades (greenie board)** lists everyone with their average points. With a Supercarrier
+  (`CVN_71`..`CVN_75`) DCS grades the landing too, and its grade is passed on as it is. Deck
+  measurements (stern, wires, deck height, angle) are the ones the Airboss authors took in DCS for the
+  Stennis, the Supercarrier Nimitz class and the Forrestal; AoA bands are for the F/A-18C and the F-14.
 * **Missile protection (SEAD and dogfight):** missiles fired by the range's SAMs, and missiles
   fired between players in the dogfight arena, are destroyed just before impact and reported as a
   hit (200 m, 500 m for big warheads). It does not rely on the Immortal command, which does not
@@ -74,6 +87,13 @@ extra step. `TRAINING_Comms.lua` lists them all in flight.
   its radar on but **holds fire** by default (`AAA live fire on/off` in the menu).
 * Bombing targets and the convoy are weapon-hold, so they never shoot back. The convoy loops its
   route for the whole mission.
+* **Strafe pit:** three T-90s in a row at the centre of `TR_STRAFE`, up from mission start (a dead one
+  comes back after 10 s). A pass starts when you are in the 3000 x 300 m box in front of them, below
+  3000 ft and flying toward them, and ends when you leave it: *"Eagle1: 23 hits of 61 rounds, 38%,
+  INEFFECTIVE PASS"*. Hits are the gun rounds that hit a target, rounds fired the drop in your ammo
+  count. A hit or a burst from inside the foul line (2000 ft) makes the pass invalid. Grades from 90%
+  (DEADEYE), 75 (EXCELLENT), 50 (GOOD), 25 (INEFFECTIVE), as the MOOSE range. **Scores** lists the pit
+  next to the bombs.
 * **Bombing scores:** every bomb, rocket and air-to-ground missile a player releases within 30 km of
   the bombing zones is followed to the ground. The pilot gets the distance from the nearest range
   target, the clock position seen along the attack heading (12 o'clock = long, 6 o'clock = short)
@@ -86,8 +106,9 @@ extra step. `TRAINING_Comms.lua` lists them all in flight.
   drop off the RWR. The site is the missile's target when the launch had one, otherwise the emitter
   it flies at. The Rapier (optical) and the IR missiles have no radar and do not react. On by
   default, `HARM reaction on/off` in the Radar Zone menu.
-* **F10 map:** the range zones with their names, each tanker's track with its radio, TACAN, level and
-  speed, the S-3B track and the carrier with its comms and BRC are drawn for BLUE, and follow the
+* **F10 map:** the range zones with their names, the strafe pit's box and foul line, each tanker's track
+  with its radio, TACAN, level and speed, the S-3B track and the carrier with its comms and BRC are
+  drawn for BLUE, and follow the
   assets (removed with them, redrawn when a speed or a course changes). `Map drawings on/off` in the
   range menu.
 * The F10 menu is for the BLUE coalition only.
